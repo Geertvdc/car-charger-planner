@@ -26,17 +26,15 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# Next standalone server bundle (+ its traced node_modules)
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+# Full app + node_modules: reliable (the Prisma CLI + its transitive deps are all
+# present for the startup `db push`, and `next start` serves the build). Larger image
+# than the standalone bundle, but bulletproof for a self-hosted personal app.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
-
-# Prisma schema + CLI + engines so we can `db push` against the mounted volume at startup
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN mkdir -p /app/data && chmod +x ./docker-entrypoint.sh
