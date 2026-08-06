@@ -2,7 +2,7 @@
 
 import { DateTime } from "luxon";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function SimulationBar({
   simulatedNowISO,
@@ -15,8 +15,17 @@ export default function SimulationBar({
   const [busy, setBusy] = useState(false);
 
   const active = simulatedNowISO != null;
-  const effective = simulatedNowISO ? DateTime.fromISO(simulatedNowISO, { zone: tz }) : DateTime.now().setZone(tz);
-  const [inputValue, setInputValue] = useState(effective.toFormat("yyyy-MM-dd'T'HH:mm"));
+  const effective = simulatedNowISO ? DateTime.fromISO(simulatedNowISO, { zone: tz }) : null;
+  // Seed the input from the simulated instant if set; otherwise fill the live clock
+  // after mount so the server/client first render match (avoids a hydration mismatch).
+  const [inputValue, setInputValue] = useState(
+    effective ? effective.toFormat("yyyy-MM-dd'T'HH:mm") : ""
+  );
+  useEffect(() => {
+    if (!simulatedNowISO && !inputValue) {
+      setInputValue(DateTime.now().setZone(tz).toFormat("yyyy-MM-dd'T'HH:mm"));
+    }
+  }, [simulatedNowISO, tz, inputValue]);
 
   async function call(body: Record<string, unknown>) {
     setBusy(true);
@@ -38,7 +47,7 @@ export default function SimulationBar({
         <span className="text-sm font-semibold">
           🧪 Simulation
           {active ? (
-            <span className="ml-2 text-[var(--color-solar)]">{effective.toFormat("ccc dd LLL HH:mm")}</span>
+            <span className="ml-2 text-[var(--color-solar)]">{effective?.toFormat("ccc dd LLL HH:mm")}</span>
           ) : (
             <span className="ml-2 text-[var(--color-muted)]">off · live clock</span>
           )}

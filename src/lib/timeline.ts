@@ -54,7 +54,10 @@ export async function buildTimeline(nowOverride?: Date): Promise<TimelineData> {
   const today = todayISO(tz, now);
 
   const startISO = addDaysISO(today, -settings.historyDays);
-  const endISO = addDaysISO(today, 2); // exclusive: covers today + tomorrow
+  // exclusive end: covers today + the next two days. Prices/solar only exist for
+  // today+tomorrow, but the extra day still renders so its target/availability can
+  // be set ahead of time.
+  const endISO = addDaysISO(today, 3);
   const rangeStart = localDayStartUTC(startISO, tz);
   const rangeEnd = localDayStartUTC(endISO, tz);
 

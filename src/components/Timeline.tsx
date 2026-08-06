@@ -1,6 +1,8 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { AvailStatus } from "@/lib/availability";
 import type { TimelineData, TimelineDay, TimelineHour } from "@/lib/timeline";
 
 const COL = 26; // px per hour
@@ -15,6 +17,18 @@ const CHARGE_H = 9;
 const LABEL_Y = CHARGE_Y + CHARGE_H + 14;
 const SVG_H = LABEL_Y + 6;
 
+// Map a morning-target SOC (0..100%) onto the price-chart band: 100% at the top,
+// 0% at the baseline. The target line/handle share this band with the price bars.
+const socY = (soc: number) => PRICE_BOTTOM - (Math.max(0, Math.min(100, soc)) / 100) * PRICE_H;
+const socFromY = (y: number) => Math.round((((PRICE_BOTTOM - y) / PRICE_H) * 100) / 5) * 5;
+
+// Cycle a home/away state on tap: away → home → maybe → away.
+const NEXT_STATUS: Record<AvailStatus, AvailStatus> = {
+  AWAY: "DEFINITE",
+  DEFINITE: "MAYBE",
+  MAYBE: "AWAY",
+};
+
 function priceColor(ratio: number): string {
   if (ratio < 0.34) return "var(--color-cheap)";
   if (ratio < 0.67) return "var(--color-mid)";
@@ -28,6 +42,7 @@ function availFill(status: string): string {
 }
 
 export default function Timeline({ data }: { data: TimelineData }) {
+  const router = useRouter();
   const [hover, setHover] = useState<{ h: TimelineHour; day: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const todayRef = useRef<HTMLDivElement>(null);
@@ -58,6 +73,15 @@ export default function Timeline({ data }: { data: TimelineData }) {
 
   const nowMs = new Date(data.now).getTime();
 
+  async function saveOverride(body: Record<string, unknown>) {
+    await fetch("/api/day/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    router.refresh();
+  }
+
   return (
     <div className="panel p-3">
       <Legend />
@@ -70,7 +94,14 @@ export default function Timeline({ data }: { data: TimelineData }) {
               minPrice={minPrice}
               maxSolar={maxSolar}
               nowMs={nowMs}
+              editable={day.isToday || day.isFuture}
               onHover={(h) => setHover(h ? { h, day: day.label } : null)}
+              onSaveTarget={(deadlineTime, targetSoc) =>
+                saveOverride({ date: day.dateISO, target: { deadlineTime, targetSoc } })
+              }
+              onSaveAvailability={(availability) =>
+                saveOverride({ date: day.dateISO, availability })
+              }
             />
           </div>
         ))}
@@ -86,17 +117,87 @@ function DayChart({
   minPrice,
   maxSolar,
   nowMs,
+  editable,
   onHover,
+  onSaveTarget,
+  onSaveAvailability,
 }: {
   day: TimelineDay;
   maxPrice: number;
   minPrice: number;
   maxSolar: number;
   nowMs: number;
+  editable: boolean;
   onHover: (h: TimelineHour | null) => void;
+  onSaveTarget: (deadlineTime: string, targetSoc: number) => void;
+  onSaveAvailability: (availability: { hour: number; status: AvailStatus }[]) => void;
 }) {
+  const svgRef = useRef<SVGSVGElement>(null);
   const width = day.hours.length * COL + PAD_X * 2;
   const xFor = (i: number) => PAD_X + i * COL;
+
+  // --- Editable morning target (draggable handle) ---
+  const [target, setTarget] = useState<{ deadlineTime: string; targetSoc: number }>({
+    deadlineTime: day.deadlineTime,
+    targetSoc: day.targetSoc,
+  });
+  const [dragging, setDragging] = useState(false);
+  // Keep the local target in sync when the server data changes (and we're not dragging).
+  useEffect(() => {
+    if (!dragging) setTarget({ deadlineTime: day.deadlineTime, targetSoc: day.targetSoc });
+  }, [day.deadlineTime, day.targetSoc, dragging]);
+
+  // --- Editable per-hour availability ---
+  const [avail, setAvail] = useState<AvailStatus[]>(() => day.hours.map((h) => h.availability));
+  useEffect(() => {
+    setAvail(day.hours.map((h) => h.availability));
+  }, [day.hours]);
+  const availAt = (i: number): AvailStatus => (editable ? avail[i] ?? "AWAY" : day.hours[i].availability);
+
+  const svgPoint = (clientX: number, clientY: number) => {
+    const rect = svgRef.current!.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * width,
+      y: ((clientY - rect.top) / rect.height) * SVG_H,
+    };
+  };
+
+  // x-position -> "HH:MM" snapped to 15 min, using each column's local hour.
+  const timeFromX = (x: number): string => {
+    const raw = (x - PAD_X) / COL;
+    const idx = Math.max(0, Math.min(day.hours.length - 1, Math.floor(raw)));
+    const frac = Math.max(0, Math.min(0.999, raw - idx));
+    let hour = day.hours[idx].localHour;
+    let minute = Math.round((frac * 60) / 15) * 15;
+    if (minute >= 60) {
+      minute = 0;
+      hour = Math.min(23, hour + 1);
+    }
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  };
+
+  const onHandleDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    setDragging(true);
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  };
+  const onHandleMove = (e: React.PointerEvent) => {
+    if (!dragging) return;
+    const { x, y } = svgPoint(e.clientX, e.clientY);
+    setTarget({ deadlineTime: timeFromX(x), targetSoc: Math.max(0, Math.min(100, socFromY(y))) });
+  };
+  const onHandleUp = () => {
+    if (!dragging) return;
+    setDragging(false);
+    onSaveTarget(target.deadlineTime, target.targetSoc);
+  };
+
+  const toggleHour = (i: number) => {
+    const next = avail.slice();
+    next[i] = NEXT_STATUS[next[i] ?? "AWAY"];
+    setAvail(next);
+    onSaveAvailability(day.hours.map((h, idx) => ({ hour: h.localHour, status: next[idx] ?? "AWAY" })));
+  };
 
   // Solar area path
   const solarPts = day.hours.map((h, i) => {
@@ -124,7 +225,16 @@ function DayChart({
     }
     return null;
   };
-  const deadlineX = markerX(day.deadlineHour);
+
+  // For an editable day, position the deadline from the (possibly dragged) local time.
+  const deadlineXFromTime = (hhmm: string): number => {
+    const [h, m] = hhmm.split(":").map(Number);
+    const idx = day.hours.findIndex((hr) => hr.localHour === h);
+    const base = idx >= 0 ? idx : h;
+    return xFor(base) + (m / 60) * COL;
+  };
+  const deadlineX = editable ? deadlineXFromTime(target.deadlineTime) : markerX(day.deadlineHour);
+  const targetY = socY(target.targetSoc);
 
   let nowX: number | null = null;
   for (let i = 0; i < day.hours.length; i++) {
@@ -144,10 +254,18 @@ function DayChart({
           {day.isOverride ? " ✎" : ""}
         </span>
         <span className="text-[var(--color-muted)]">
-          🎯 {day.targetSoc}% @ {day.deadlineTime}
+          🎯 {editable ? target.targetSoc : day.targetSoc}% @ {editable ? target.deadlineTime : day.deadlineTime}
         </span>
       </div>
-      <svg width={width} height={SVG_H} className="block">
+      <svg
+        ref={svgRef}
+        width={width}
+        height={SVG_H}
+        className={editable ? "block touch-none" : "block"}
+        onPointerMove={onHandleMove}
+        onPointerUp={onHandleUp}
+        onPointerLeave={onHandleUp}
+      >
         {/* availability band background */}
         {day.hours.map((h, i) => (
           <rect
@@ -156,7 +274,7 @@ function DayChart({
             y={AVAIL_Y}
             width={COL}
             height={AVAIL_H}
-            fill={availFill(h.availability)}
+            fill={availFill(availAt(i))}
           />
         ))}
 
@@ -235,6 +353,28 @@ function DayChart({
           </g>
         ))}
 
+        {/* editable per-hour home/away toggle cells (drawn on top so they get the clicks).
+            Note: no SVG <title> tooltip here — React 19 hoists <title> as document
+            metadata, which mismatches on hydration inside SVG. Hover forwards to the
+            detail bar instead. */}
+        {editable &&
+          day.hours.map((h, i) => (
+            <rect
+              key={`edit-${i}`}
+              x={xFor(i) + 0.5}
+              y={AVAIL_Y}
+              width={COL - 1}
+              height={AVAIL_H}
+              fill={availFill(availAt(i))}
+              stroke="rgba(56,189,248,0.5)"
+              strokeWidth={0.5}
+              style={{ cursor: "pointer" }}
+              onClick={() => toggleHour(i)}
+              onMouseEnter={() => onHover(h)}
+              onMouseLeave={() => onHover(null)}
+            />
+          ))}
+
         {/* deadline marker */}
         {deadlineX != null && (
           <line
@@ -248,11 +388,61 @@ function DayChart({
           />
         )}
 
+        {/* editable target: horizontal SOC line + draggable handle */}
+        {editable && deadlineX != null && (
+          <g>
+            <line
+              x1={PAD_X}
+              y1={targetY}
+              x2={width - PAD_X}
+              y2={targetY}
+              stroke="var(--color-accent)"
+              strokeWidth={1}
+              strokeDasharray="2 3"
+              opacity={0.6}
+            />
+            {/* larger invisible hit area for easier grabbing */}
+            <circle
+              cx={deadlineX}
+              cy={targetY}
+              r={11}
+              fill="transparent"
+              style={{ cursor: "grab" }}
+              onPointerDown={onHandleDown}
+            />
+            <circle
+              cx={deadlineX}
+              cy={targetY}
+              r={5}
+              fill="var(--color-accent)"
+              stroke="#04121f"
+              strokeWidth={1.5}
+              style={{ cursor: dragging ? "grabbing" : "grab", pointerEvents: "none" }}
+            />
+            <text
+              x={Math.min(deadlineX + 8, width - PAD_X)}
+              y={Math.max(targetY - 7, PRICE_TOP + 8)}
+              textAnchor={deadlineX > width - 60 ? "end" : "start"}
+              fontSize="9"
+              fontWeight={600}
+              fill="var(--color-accent)"
+              style={{ pointerEvents: "none" }}
+            >
+              {target.targetSoc}% @ {target.deadlineTime}
+            </text>
+          </g>
+        )}
+
         {/* now marker */}
         {nowX != null && (
           <line x1={nowX} y1={PRICE_TOP - 4} x2={nowX} y2={CHARGE_Y + CHARGE_H} stroke="#fff" strokeWidth={1.2} />
         )}
       </svg>
+      {editable && (
+        <div className="mt-1 text-[10px] leading-tight text-[var(--color-muted)]">
+          Drag ● to set this day&apos;s target · tap the home bar to toggle home/maybe/away
+        </div>
+      )}
     </div>
   );
 }
