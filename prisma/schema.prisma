@@ -1,0 +1,133 @@
+// Car Charger Planner — data model
+// SQLite has no native enums; status/source fields are strings with documented values.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---- Configuration (singletons keyed by id = 1) ----
+
+model Settings {
+  id                 Int      @id @default(1)
+  locationName       String   @default("")
+  latitude           Float    @default(52.37)
+  longitude          Float    @default(4.90)
+  timezone           String   @default("Europe/Amsterdam")
+  // All-in price = rawEpex + energyTaxPerKwh + supplierFeePerKwh, then * (1 + vatRate)
+  energyTaxPerKwh    Float    @default(0.1088)
+  supplierFeePerKwh  Float    @default(0.02)
+  vatRate            Float    @default(0.21)
+  feedInTariffPerKwh Float    @default(0.0)
+  // Fraction of forecast PV assumed available to the car (rest is house load). 0..1
+  houseLoadFactor    Float    @default(0.7)
+  historyDays        Int      @default(3)
+  haToken            String   @default("")
+  // When set, the planner/timeline/HA treat this instant as "now" (simulation mode).
+  simulatedNow       DateTime?
+  updatedAt          DateTime @updatedAt @default(now())
+}
+
+model CarConfig {
+  id            Int      @id @default(1)
+  batteryKwh    Float    @default(58)
+  chargerPowerKw Float   @default(11)
+  efficiency    Float    @default(0.9) // 0..1
+  minSoc        Int      @default(10)
+  maxSoc        Int      @default(90)
+  updatedAt     DateTime @updatedAt @default(now())
+}
+
+model PvString {
+  id       Int    @id @default(autoincrement())
+  name     String @default("PV")
+  kwp      Float  @default(3.0)
+  tilt     Int    @default(35) // declination degrees, 0=horizontal, 90=vertical
+  azimuth  Int    @default(0)  // -180..180, 0=south, -90=east, 90=west (Forecast.Solar convention)
+}
+
+// ---- Availability template + overrides ----
+
+model WeeklyDay {
+  id           Int          @id @default(autoincrement())
+  dayOfWeek    Int          @unique // 0=Monday .. 6=Sunday
+  deadlineTime String       @default("07:00")
+  targetSoc    Int          @default(80)
+  windows      HomeWindow[]
+}
+
+model DayOverride {
+  id           Int          @id @default(autoincrement())
+  date         String       @unique // YYYY-MM-DD (local)
+  deadlineTime String?
+  targetSoc    Int?
+  away         Boolean      @default(false) // explicitly away all day (no charging)
+  note         String?
+  windows      HomeWindow[]
+}
+
+model HomeWindow {
+  id            Int          @id @default(autoincrement())
+  startTime     String // HH:MM local
+  endTime       String // HH:MM local
+  status        String       @default("DEFINITE") // DEFINITE | MAYBE
+  weeklyDay     WeeklyDay?   @relation(fields: [weeklyDayId], references: [id], onDelete: Cascade)
+  weeklyDayId   Int?
+  dayOverride   DayOverride? @relation(fields: [dayOverrideId], references: [id], onDelete: Cascade)
+  dayOverrideId Int?
+}
+
+// ---- Runtime / time-series state ----
+
+model CarState {
+  id     Int      @id @default(autoincrement())
+  soc    Int
+  at     DateTime @default(now())
+  source String   @default("manual") // manual | estimate
+}
+
+model PriceSnapshot {
+  id         Int      @id @default(autoincrement())
+  hourStart  DateTime @unique
+  rawPrice   Float // raw EPEX EUR/kWh
+  allInPrice Float // EUR/kWh incl. taxes/fees/VAT
+  fetchedAt  DateTime @default(now())
+}
+
+model SolarForecast {
+  id         Int      @id @default(autoincrement())
+  hourStart  DateTime @unique
+  expectedWh Float
+  fetchedAt  DateTime @default(now())
+}
+
+model ChargeSlot {
+  id          Int      @id @default(autoincrement())
+  hourStart   DateTime @unique
+  on          Boolean  @default(false)
+  expectedKwh Float    @default(0)
+  expectedCost Float   @default(0)
+  source      String   @default("grid") // grid | solar | mixed
+}
+
+model PlanState {
+  id            Int      @id @default(1)
+  computedAt    DateTime @default(now())
+  charging      Boolean  @default(false)
+  chargingUntil DateTime?
+  targetSoc     Int?
+  reason        String   @default("")
+  feasible      Boolean  @default(true)
+  shortfallKwh  Float    @default(0)
+}
+
+model ChargeLog {
+  id   Int      @id @default(autoincrement())
+  at   DateTime @default(now())
+  on   Boolean
+  note String?
+}

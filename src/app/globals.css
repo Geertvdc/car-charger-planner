@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b1220;
+  --color-panel: #131c2e;
+  --color-panel-2: #1a2740;
+  --color-border: #26344f;
+  --color-muted: #8ea0bd;
+  --color-text: #e6edf7;
+  --color-accent: #38bdf8;
+  --color-solar: #f5c542;
+  --color-cheap: #34d399;
+  --color-mid: #fbbf24;
+  --color-expensive: #f87171;
+  --color-charge: #22d3ee;
+}
+
+html,
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+.panel {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-2);
+  color: var(--color-text);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.btn:hover {
+  background: #223154;
+}
+.btn-primary {
+  background: var(--color-accent);
+  color: #04121f;
+  border-color: transparent;
+  font-weight: 600;
+}
+.btn-primary:hover {
+  background: #7dd3fc;
+}
+
+.input,
+.select {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  color: var(--color-text);
+  font-size: 0.875rem;
+  width: 100%;
+}
+
+.label {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin-bottom: 0.25rem;
+  display: block;
+}

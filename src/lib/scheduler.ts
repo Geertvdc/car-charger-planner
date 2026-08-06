@@ -1,0 +1,45 @@
+import { refreshAll } from "./refresh";
+import { recomputePlan } from "./plan";
+
+const g = globalThis as unknown as {
+  __chargerSchedulerStarted?: boolean;
+  __chargerTimers?: NodeJS.Timeout[];
+};
+
+const REFRESH_MS = 30 * 60 * 1000; // full data refresh + recompute every 30 min
+const RECOMPUTE_MS = 10 * 60 * 1000; // advance the plan "now" pointer every 10 min
+
+/**
+ * Background schedule using plain intervals (no external cron dep, bundles cleanly).
+ * Idempotent — safe to call from the Next.js instrumentation hook and/or a worker.
+ *
+ * A 30-min refresh comfortably covers: tomorrow's prices (published ~13:00 and picked
+ * up on the next tick), periodic solar updates, and hourly plan advancement. HA always
+ * reads the live on/off for the current hour from stored slots, so between recomputes
+ * the served decision stays correct.
+ */
+export function startScheduler(): void {
+  if (g.__chargerSchedulerStarted) return;
+  g.__chargerSchedulerStarted = true;
+  g.__chargerTimers = [];
+
+  // Initial catch-up shortly after boot.
+  setTimeout(() => run("startup", () => refreshAll()), 4000);
+
+  g.__chargerTimers.push(setInterval(() => run("refresh", () => refreshAll()), REFRESH_MS));
+  g.__chargerTimers.push(
+    setInterval(() => run("recompute", () => recomputePlan()), RECOMPUTE_MS)
+  );
+
+  console.log("[scheduler] started");
+}
+
+async function run(name: string, fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    await recomputePlan().catch(() => undefined);
+    console.log(`[scheduler] ${name} ok`);
+  } catch (e) {
+    console.error(`[scheduler] ${name} failed:`, (e as Error).message);
+  }
+}

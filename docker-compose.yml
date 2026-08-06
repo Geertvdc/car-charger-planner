@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    container_name: car-charger-planner
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      TZ: "Europe/Amsterdam"
+      NODE_ENV: "production"
+      DATABASE_URL: "file:/app/data/app.db?connection_limit=1"
+      # Token Home Assistant must send to /api/ha/* (also editable in Settings UI).
+      HA_API_TOKEN: "${HA_API_TOKEN:-change-me}"
+      # Optional single-password gate for the UI (empty = open on LAN).
+      UI_PASSWORD: "${UI_PASSWORD:-}"
+    volumes:
+      - charger-data:/app/data
+
+volumes:
+  charger-data:
