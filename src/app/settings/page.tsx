@@ -8,7 +8,7 @@ export default async function SettingsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Settings</h1>
+      <h1 className="text-2xl font-extrabold tracking-tight">Settings</h1>
 
       <form action={geocodeLocation} className="panel space-y-3 p-5">
         <h2 className="text-sm font-semibold text-[var(--color-accent)]">Location</h2>

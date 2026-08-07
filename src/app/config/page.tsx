@@ -11,7 +11,7 @@ export default async function ConfigPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Car &amp; solar</h1>
+      <h1 className="text-2xl font-extrabold tracking-tight">Car &amp; solar</h1>
 
       <form action={saveCar} className="panel space-y-4 p-5">
         <h2 className="text-sm font-semibold text-[var(--color-accent)]">Car &amp; charger</h2>

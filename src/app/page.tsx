@@ -21,32 +21,35 @@ export default async function DashboardPage() {
   const tz = data?.tz ?? settings?.timezone ?? "Europe/Amsterdam";
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">Dashboard</h1>
+        <h1 className="text-2xl font-extrabold tracking-tight">Dashboard</h1>
         <RefreshButton />
       </div>
 
-      <SimulationBar
-        simulatedNowISO={settings?.simulatedNow ? settings.simulatedNow.toISOString() : null}
-        tz={tz}
-      />
+      {data ? (
+        <Timeline data={data} />
+      ) : (
+        <div className="panel-hero p-6 text-[var(--color-muted)]">
+          Couldn&apos;t load the timeline just now — hit “Refresh data &amp; plan” to try again.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <StatusCard plan={plan} />
         <div className="panel p-4">
           <div className="label">Current charge</div>
           <SocEditor initialSoc={latestSoc?.soc ?? 50} />
-          <div className="mt-1 text-xs text-[var(--color-muted)]">
+          <div className="mt-2 text-xs text-[var(--color-muted)]">
             Battery {car?.batteryKwh ?? "?"} kWh · charger {car?.chargerPowerKw ?? "?"} kW
           </div>
         </div>
         <div className="panel p-4">
           <div className="label">Plan feasibility</div>
           {plan?.feasible ? (
-            <div className="text-[var(--color-cheap)]">On track ✓</div>
+            <div className="font-semibold text-[var(--color-cheap)]">On track ✓</div>
           ) : (
-            <div className="text-[var(--color-expensive)]">
+            <div className="font-semibold text-[var(--color-expensive)]">
               Short by {(plan?.shortfallKwh ?? 0).toFixed(1)} kWh
             </div>
           )}
@@ -54,13 +57,10 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      {data ? (
-        <Timeline data={data} />
-      ) : (
-        <div className="panel p-6 text-[var(--color-muted)]">
-          Couldn&apos;t load the timeline just now — hit “Refresh data &amp; plan” to try again.
-        </div>
-      )}
+      <SimulationBar
+        simulatedNowISO={settings?.simulatedNow ? settings.simulatedNow.toISOString() : null}
+        tz={tz}
+      />
     </div>
   );
 }
@@ -74,7 +74,7 @@ function StatusCard({
   return (
     <div className="panel p-4">
       <div className="label">Charger right now</div>
-      <div className={`text-lg font-semibold ${charging ? "text-[var(--color-charge)]" : "text-[var(--color-muted)]"}`}>
+      <div className={`text-lg font-bold ${charging ? "text-[var(--color-charge)]" : "text-[var(--color-muted)]"}`}>
         {charging ? "⚡ Charging" : "◌ Idle"}
       </div>
       <div className="mt-1 text-xs text-[var(--color-muted)]">
