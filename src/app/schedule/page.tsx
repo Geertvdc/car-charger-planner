@@ -15,7 +15,7 @@ export default async function SchedulePage() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold">Weekly schedule</h1>
+        <h1 className="text-2xl font-extrabold tracking-tight">Weekly schedule</h1>
         <p className="mt-1 text-sm text-[var(--color-muted)]">
           Your default week: when you&apos;re home (charging is only planned in home windows) and how
           full the car must be by each morning. Use <span className="text-[var(--color-accent)]">Upcoming days</span> to
@@ -75,8 +75,8 @@ export default async function SchedulePage() {
                     <span
                       className={`rounded px-1.5 py-0.5 text-xs ${
                         w.status === "MAYBE"
-                          ? "bg-[rgba(56,189,248,0.12)] text-[var(--color-muted)]"
-                          : "bg-[rgba(56,189,248,0.25)] text-[var(--color-text)]"
+                          ? "bg-[rgba(94,200,255,0.12)] text-[var(--color-muted)]"
+                          : "bg-[rgba(94,200,255,0.28)] text-[var(--color-text)]"
                       }`}
                     >
                       {w.status === "MAYBE" ? "maybe home" : "home"}

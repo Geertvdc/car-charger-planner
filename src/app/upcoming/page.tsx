@@ -34,7 +34,7 @@ export default async function UpcomingPage() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold">Upcoming days</h1>
+        <h1 className="text-2xl font-extrabold tracking-tight">Upcoming days</h1>
         <p className="mt-1 text-sm text-[var(--color-muted)]">
           Diverge from the weekly template for specific dates. An override replaces that day&apos;s home
           windows; deadline &amp; target fall back to the template if left blank.
@@ -45,12 +45,20 @@ export default async function UpcomingPage() {
         {rows.map(({ date, label, effective, override }) => (
           <div key={date} className="panel space-y-3 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="font-semibold">
-                {label}
-                {date === today && <span className="ml-2 text-xs text-[var(--color-accent)]">today</span>}
-                {override && <span className="ml-2 text-xs text-[var(--color-solar)]">✎ override</span>}
-              </h2>
-              <span className="text-xs text-[var(--color-muted)]">
+              <div className="flex items-center gap-2">
+                <h2 className="font-semibold">{label}</h2>
+                {date === today && (
+                  <span className="rounded-md bg-[rgba(94,200,255,0.14)] px-2 py-0.5 text-[11px] font-bold text-[var(--color-home)]">
+                    TODAY
+                  </span>
+                )}
+                {override && (
+                  <span className="rounded-md bg-[rgba(255,201,77,0.14)] px-2 py-0.5 text-[11px] font-bold text-[var(--color-accent)]">
+                    OVERRIDE
+                  </span>
+                )}
+              </div>
+              <span className="font-mono text-xs text-[var(--color-muted)]">
                 effective: {effective.targetSoc}% by {effective.deadlineTime} ·{" "}
                 {effective.windows.length === 0
                   ? "away"

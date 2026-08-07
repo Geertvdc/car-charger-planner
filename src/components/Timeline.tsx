@@ -5,16 +5,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AvailStatus } from "@/lib/availability";
 import type { TimelineData, TimelineDay, TimelineHour } from "@/lib/timeline";
 
-const COL = 26; // px per hour
-const PAD_X = 8;
-const PRICE_TOP = 10;
-const PRICE_H = 96;
+const COL = 30; // px per hour
+const PAD_X = 10;
+const PRICE_TOP = 12;
+const PRICE_H = 140;
 const PRICE_BOTTOM = PRICE_TOP + PRICE_H;
-const AVAIL_Y = PRICE_BOTTOM + 8;
-const AVAIL_H = 10;
-const CHARGE_Y = AVAIL_Y + AVAIL_H + 3;
-const CHARGE_H = 9;
-const LABEL_Y = CHARGE_Y + CHARGE_H + 14;
+const AVAIL_Y = PRICE_BOTTOM + 10;
+const AVAIL_H = 14;
+const CHARGE_Y = AVAIL_Y + AVAIL_H + 4;
+const CHARGE_H = 11;
+const LABEL_Y = CHARGE_Y + CHARGE_H + 16;
 const SVG_H = LABEL_Y + 6;
 
 // Map a morning-target SOC (0..100%) onto the price-chart band: 100% at the top,
@@ -29,15 +29,19 @@ const NEXT_STATUS: Record<AvailStatus, AvailStatus> = {
   MAYBE: "AWAY",
 };
 
-function priceColor(ratio: number): string {
-  if (ratio < 0.34) return "var(--color-cheap)";
-  if (ratio < 0.67) return "var(--color-mid)";
-  return "var(--color-expensive)";
+function priceRatio(price: number, maxPrice: number): number {
+  return price / maxPrice;
+}
+
+function barFill(ratio: number): string {
+  if (ratio < 0.4) return "url(#gradCheap)";
+  if (ratio < 0.66) return "url(#gradMid)";
+  return "url(#gradExpensive)";
 }
 
 function availFill(status: string): string {
-  if (status === "DEFINITE") return "rgba(56,189,248,0.28)";
-  if (status === "MAYBE") return "rgba(56,189,248,0.10)";
+  if (status === "DEFINITE") return "rgba(94,200,255,0.32)";
+  if (status === "MAYBE") return "rgba(94,200,255,0.12)";
   return "transparent";
 }
 
@@ -83,28 +87,62 @@ export default function Timeline({ data }: { data: TimelineData }) {
   }
 
   return (
-    <div className="panel p-3">
-      <Legend />
-      <div ref={scrollRef} className="mt-2 flex gap-3 overflow-x-auto pb-2">
-        {data.days.map((day) => (
-          <div key={day.dateISO} ref={day.isToday ? todayRef : undefined}>
-            <DayChart
-              day={day}
-              maxPrice={maxPrice}
-              minPrice={minPrice}
-              maxSolar={maxSolar}
-              nowMs={nowMs}
-              editable={day.isToday || day.isFuture}
-              onHover={(h) => setHover(h ? { h, day: day.label } : null)}
-              onSaveTarget={(deadlineTime, targetSoc) =>
-                saveOverride({ date: day.dateISO, target: { deadlineTime, targetSoc } })
-              }
-              onSaveAvailability={(availability) =>
-                saveOverride({ date: day.dateISO, availability })
-              }
-            />
-          </div>
-        ))}
+    <div className="panel-hero p-5 sm:p-6">
+      <svg width="0" height="0" style={{ position: "absolute" }}>
+        <defs>
+          <linearGradient id="gradCheap" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3fa37a" />
+            <stop offset="100%" stopColor="#2e9e6e" />
+          </linearGradient>
+          <linearGradient id="gradMid" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#d98536" />
+            <stop offset="100%" stopColor="#c96f26" />
+          </linearGradient>
+          <linearGradient id="gradExpensive" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#c9584f" />
+            <stop offset="100%" stopColor="#b94943" />
+          </linearGradient>
+        </defs>
+      </svg>
+
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--color-muted)]">
+          Energy timeline
+        </div>
+        <Legend />
+      </div>
+
+      <div className="relative -mx-5 sm:-mx-6">
+        <div
+          ref={scrollRef}
+          className="flex gap-8 overflow-x-auto px-5 pb-2 pt-3 sm:px-6"
+          style={{
+            maskImage:
+              "linear-gradient(90deg, transparent, black 32px, black calc(100% - 40px), transparent)",
+            WebkitMaskImage:
+              "linear-gradient(90deg, transparent, black 32px, black calc(100% - 40px), transparent)",
+          }}
+        >
+          {data.days.map((day) => (
+            <div key={day.dateISO} ref={day.isToday ? todayRef : undefined}>
+              <DayChart
+                day={day}
+                maxPrice={maxPrice}
+                minPrice={minPrice}
+                maxSolar={maxSolar}
+                nowMs={nowMs}
+                editable={day.isToday || day.isFuture}
+                onHover={(h) => setHover(h ? { h, day: day.label } : null)}
+                onSaveTarget={(deadlineTime, targetSoc) =>
+                  saveOverride({ date: day.dateISO, target: { deadlineTime, targetSoc } })
+                }
+                onSaveAvailability={(availability) =>
+                  saveOverride({ date: day.dateISO, availability })
+                }
+              />
+            </div>
+          ))}
+        </div>
       </div>
       <HoverInfo hover={hover} />
     </div>
@@ -246,15 +284,15 @@ function DayChart({
   }
 
   return (
-    <div className="shrink-0">
-      <div className="mb-1 flex items-center justify-between text-xs">
-        <span className={day.isToday ? "font-semibold text-[var(--color-accent)]" : "text-[var(--color-muted)]"}>
+    <div className="shrink-0" style={{ minWidth: width }}>
+      <div className="mb-2.5 flex items-baseline justify-between gap-3 text-sm">
+        <span className={day.isToday ? "font-bold" : "font-semibold text-[var(--color-muted)]"}>
           {day.label}
-          {day.isToday ? " • today" : ""}
+          {day.isToday ? <span className="font-medium text-[var(--color-muted)]"> · today</span> : ""}
           {day.isOverride ? " ✎" : ""}
         </span>
-        <span className="text-[var(--color-muted)]">
-          🎯 {editable ? target.targetSoc : day.targetSoc}% @ {editable ? target.deadlineTime : day.deadlineTime}
+        <span className="font-mono text-xs text-[var(--color-accent)]">
+          target {editable ? target.targetSoc : day.targetSoc}% @ {editable ? target.deadlineTime : day.deadlineTime}
         </span>
       </div>
       <svg
@@ -266,6 +304,17 @@ function DayChart({
         onPointerUp={onHandleUp}
         onPointerLeave={onHandleUp}
       >
+        {/* chart background */}
+        <rect
+          x={PAD_X - 4}
+          y={PRICE_TOP - 4}
+          width={width - PAD_X * 2 + 8}
+          height={PRICE_H + 8}
+          rx={10}
+          fill="rgba(0,0,0,0.22)"
+          stroke="rgba(255,255,255,0.05)"
+        />
+
         {/* availability band background */}
         {day.hours.map((h, i) => (
           <rect
@@ -281,9 +330,8 @@ function DayChart({
         {/* price bars */}
         {day.hours.map((h, i) => {
           if (h.allInPrice == null) return null;
-          const ratio =
-            maxPrice > minPrice ? (h.allInPrice - minPrice) / (maxPrice - minPrice) : 0.5;
-          const barH = Math.max(1, (h.allInPrice / maxPrice) * PRICE_H);
+          const ratio = priceRatio(h.allInPrice, maxPrice);
+          const barH = Math.max(2, ratio * PRICE_H);
           return (
             <rect
               key={`p-${i}`}
@@ -291,15 +339,17 @@ function DayChart({
               y={PRICE_BOTTOM - barH}
               width={COL - 4}
               height={barH}
-              rx={2}
-              fill={priceColor(ratio)}
-              opacity={h.isPast ? 0.45 : 0.9}
+              rx={3}
+              fill={barFill(ratio)}
+              opacity={h.isPast ? 0.42 : 0.92}
             />
           );
         })}
 
         {/* solar area */}
-        {solarArea && <path d={solarArea} fill="rgba(245,197,66,0.18)" stroke="var(--color-solar)" strokeWidth={1} />}
+        {solarArea && (
+          <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="var(--color-solar)" strokeWidth={1.5} />
+        )}
 
         {/* planned charge band */}
         {day.hours.map((h, i) =>
@@ -310,9 +360,10 @@ function DayChart({
               y={CHARGE_Y}
               width={COL - 2}
               height={CHARGE_H}
-              rx={2}
+              rx={3}
               fill="var(--color-charge)"
-              opacity={0.85}
+              opacity={0.9}
+              style={{ filter: "drop-shadow(0 0 6px rgba(255,201,77,0.6))" }}
             />
           ) : null
         )}
@@ -325,7 +376,7 @@ function DayChart({
               y={CHARGE_Y}
               width={COL - 2}
               height={CHARGE_H}
-              rx={2}
+              rx={3}
               fill="none"
               stroke="var(--color-charge)"
               strokeWidth={1.5}
@@ -346,7 +397,14 @@ function DayChart({
               onMouseLeave={() => onHover(null)}
             />
             {h.localHour % 6 === 0 && (
-              <text x={xFor(i) + COL / 2} y={LABEL_Y} textAnchor="middle" fontSize="9" fill="var(--color-muted)">
+              <text
+                x={xFor(i) + COL / 2}
+                y={LABEL_Y}
+                textAnchor="middle"
+                fontSize="10"
+                fontFamily="var(--font-mono)"
+                fill="var(--color-muted)"
+              >
                 {String(h.localHour).padStart(2, "0")}
               </text>
             )}
@@ -365,8 +423,9 @@ function DayChart({
               y={AVAIL_Y}
               width={COL - 1}
               height={AVAIL_H}
+              rx={3}
               fill={availFill(availAt(i))}
-              stroke="rgba(56,189,248,0.5)"
+              stroke="rgba(94,200,255,0.5)"
               strokeWidth={0.5}
               style={{ cursor: "pointer" }}
               onClick={() => toggleHour(i)}
@@ -383,7 +442,7 @@ function DayChart({
             x2={deadlineX}
             y2={CHARGE_Y + CHARGE_H}
             stroke="var(--color-accent)"
-            strokeWidth={1}
+            strokeWidth={1.5}
             strokeDasharray="3 2"
           />
         )}
@@ -405,7 +464,7 @@ function DayChart({
             <circle
               cx={deadlineX}
               cy={targetY}
-              r={11}
+              r={12}
               fill="transparent"
               style={{ cursor: "grab" }}
               onPointerDown={onHandleDown}
@@ -413,18 +472,23 @@ function DayChart({
             <circle
               cx={deadlineX}
               cy={targetY}
-              r={5}
+              r={6}
               fill="var(--color-accent)"
-              stroke="#04121f"
+              stroke="#161207"
               strokeWidth={1.5}
-              style={{ cursor: dragging ? "grabbing" : "grab", pointerEvents: "none" }}
+              style={{
+                cursor: dragging ? "grabbing" : "grab",
+                pointerEvents: "none",
+                filter: "drop-shadow(0 0 8px rgba(255,201,77,0.8))",
+              }}
             />
             <text
-              x={Math.min(deadlineX + 8, width - PAD_X)}
-              y={Math.max(targetY - 7, PRICE_TOP + 8)}
+              x={Math.min(deadlineX + 9, width - PAD_X)}
+              y={Math.max(targetY - 8, PRICE_TOP + 8)}
               textAnchor={deadlineX > width - 60 ? "end" : "start"}
-              fontSize="9"
-              fontWeight={600}
+              fontSize="10"
+              fontWeight={700}
+              fontFamily="var(--font-mono)"
               fill="var(--color-accent)"
               style={{ pointerEvents: "none" }}
             >
@@ -435,11 +499,19 @@ function DayChart({
 
         {/* now marker */}
         {nowX != null && (
-          <line x1={nowX} y1={PRICE_TOP - 4} x2={nowX} y2={CHARGE_Y + CHARGE_H} stroke="#fff" strokeWidth={1.2} />
+          <line
+            x1={nowX}
+            y1={PRICE_TOP - 4}
+            x2={nowX}
+            y2={CHARGE_Y + CHARGE_H}
+            stroke="#ffffff"
+            strokeWidth={1.4}
+            style={{ filter: "drop-shadow(0 0 4px rgba(255,255,255,0.6))" }}
+          />
         )}
       </svg>
       {editable && (
-        <div className="mt-1 text-[10px] leading-tight text-[var(--color-muted)]">
+        <div className="mt-1.5 text-[10px] leading-tight text-[var(--color-muted)]">
           Drag ● to set this day&apos;s target · tap the home bar to toggle home/maybe/away
         </div>
       )}
@@ -454,18 +526,18 @@ function Legend() {
     ["var(--color-expensive)", "expensive"],
     ["var(--color-solar)", "solar"],
     ["var(--color-charge)", "charging"],
-    ["rgba(56,189,248,0.28)", "home"],
+    ["rgba(94,200,255,0.32)", "home"],
   ];
   return (
-    <div className="flex flex-wrap gap-3 text-xs text-[var(--color-muted)]">
+    <div className="flex flex-wrap gap-4 text-[11px] text-[var(--color-muted)]">
       {items.map(([c, l]) => (
         <span key={l} className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm" style={{ background: c }} />
+          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c }} />
           {l}
         </span>
       ))}
       <span className="flex items-center gap-1.5">
-        <span className="inline-block h-3 w-0.5 bg-[var(--color-accent)]" /> deadline
+        <span className="inline-block h-2.5 w-0.5 bg-[var(--color-accent)]" /> deadline
       </span>
     </div>
   );
@@ -477,8 +549,8 @@ function HoverInfo({ hover }: { hover: { h: TimelineHour; day: string } | null }
   }
   const { h, day } = hover;
   return (
-    <div className="mt-2 h-5 text-xs text-[var(--color-text)]">
-      <span className="text-[var(--color-muted)]">{day}</span> {String(h.localHour).padStart(2, "0")}:00 ·{" "}
+    <div className="mt-2 h-5 font-mono text-xs text-[var(--color-text)]">
+      <span className="font-sans text-[var(--color-muted)]">{day}</span> {String(h.localHour).padStart(2, "0")}:00 ·{" "}
       {h.allInPrice != null ? `€${h.allInPrice.toFixed(3)}/kWh` : "no price"} · ☀ {(h.solarWh / 1000).toFixed(2)} kWh ·{" "}
       {h.availability.toLowerCase()}
       {h.planned ? ` · charging ${h.plannedKwh.toFixed(1)} kWh` : ""}

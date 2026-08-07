@@ -1,6 +1,21 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Manrope, JetBrains_Mono } from "next/font/google";
+import NavLinks from "@/components/NavLinks";
 import "./globals.css";
+
+const manrope = Manrope({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
+  variable: "--font-manrope",
+  display: "swap",
+});
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-jetbrains-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Car Charger Planner",
@@ -8,40 +23,63 @@ export const metadata: Metadata = {
     "Plan EV charging on dynamic NL energy prices, solar forecast and your home availability.",
 };
 
-const nav = [
-  { href: "/", label: "Dashboard" },
-  { href: "/schedule", label: "Weekly schedule" },
-  { href: "/upcoming", label: "Upcoming days" },
-  { href: "/config", label: "Car & solar" },
-  { href: "/settings", label: "Settings" },
-];
-
 export default function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${manrope.variable} ${jetbrainsMono.variable}`}>
       <body>
-        <div className="min-h-screen">
-          <header className="border-b border-[var(--color-border)] bg-[var(--color-panel)]">
-            <div className="mx-auto flex max-w-6xl items-center gap-6 px-4 py-3">
-              <Link href="/" className="flex items-center gap-2 font-semibold">
-                <span className="text-xl">⚡</span>
+        <div className="bg-blobs">
+          <div
+            className="bg-blob"
+            style={{
+              top: "-360px",
+              left: "-360px",
+              width: "600px",
+              height: "600px",
+              background: "radial-gradient(circle, #FFC94D, transparent 68%)",
+              opacity: 0.1,
+              animation: "drift1 22s ease-in-out infinite",
+            }}
+          />
+          <div
+            className="bg-blob"
+            style={{
+              top: "30%",
+              right: "-320px",
+              width: "700px",
+              height: "700px",
+              background: "radial-gradient(circle, #4FB6FF, transparent 68%)",
+              opacity: 0.09,
+              animation: "drift2 26s ease-in-out infinite",
+            }}
+          />
+          <div
+            className="bg-blob"
+            style={{
+              top: "900px",
+              left: "18%",
+              width: "700px",
+              height: "700px",
+              background: "radial-gradient(circle, #FFD873, transparent 70%)",
+              opacity: 0.08,
+            }}
+          />
+        </div>
+
+        <div className="relative z-[1] min-h-screen">
+          <header className="sticky top-0 z-20 border-b border-white/10 bg-[rgba(6,8,13,0.72)] shadow-[0_1px_24px_rgba(0,0,0,0.3)] backdrop-blur-2xl backdrop-saturate-150">
+            <div className="mx-auto flex max-w-6xl items-center gap-6 overflow-x-auto px-4 py-3">
+              <Link
+                href="/"
+                className="flex shrink-0 items-center gap-2 whitespace-nowrap text-[15px] font-extrabold tracking-tight"
+              >
+                <span className="text-lg drop-shadow-[0_0_8px_rgba(255,201,77,0.6)]">⚡</span>
                 <span>Car Charger Planner</span>
               </Link>
-              <nav className="flex flex-wrap gap-1 text-sm">
-                {nav.map((n) => (
-                  <Link
-                    key={n.href}
-                    href={n.href}
-                    className="rounded-md px-3 py-1.5 text-[var(--color-muted)] hover:bg-[var(--color-panel-2)] hover:text-[var(--color-text)]"
-                  >
-                    {n.label}
-                  </Link>
-                ))}
-              </nav>
+              <NavLinks />
             </div>
           </header>
           <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
