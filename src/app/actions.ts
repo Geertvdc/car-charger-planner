@@ -11,6 +11,11 @@ const num = (v: FormDataEntryValue | null, d = 0) => {
   return Number.isFinite(n) ? n : d;
 };
 const str = (v: FormDataEntryValue | null, d = "") => (typeof v === "string" ? v : d);
+const numOrNull = (v: FormDataEntryValue | null): number | null => {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
 
 async function revalidateAll() {
   revalidatePath("/");
@@ -57,6 +62,7 @@ export async function saveSettings(formData: FormData) {
       vatRate: num(formData.get("vatRate")),
       feedInTariffPerKwh: num(formData.get("feedInTariffPerKwh")),
       houseLoadFactor: Math.min(1, Math.max(0, num(formData.get("houseLoadFactor"), 0.7))),
+      cheapPriceThresholdPerKwh: numOrNull(formData.get("cheapPriceThresholdPerKwh")),
       historyDays: Math.max(0, Math.round(num(formData.get("historyDays"), 3))),
       haToken: str(formData.get("haToken")),
     },

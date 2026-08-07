@@ -16,6 +16,7 @@
   --color-mid: #c96f26;
   --color-expensive: #b94943;
   --color-charge: #ffc94d;
+  --color-charge-cheap: #2e9e6e;
 
   --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, "SFMono-Regular", monospace;

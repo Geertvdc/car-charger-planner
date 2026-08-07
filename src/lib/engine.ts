@@ -23,6 +23,8 @@ export interface EngineInput {
   efficiency: number; // 0..1, wall-to-battery
   houseLoadFactor: number; // fraction of forecast PV usable by the car (0..1)
   feedInTariffPerKwh: number; // opportunity cost of self-consumed solar
+  maxSoc?: number; // %, cap for opportunistic cheap charging (default 100)
+  cheapPriceThresholdPerKwh?: number | null; // charge below this effective cost even without target need
 }
 
 export interface MultiEngineInput {
@@ -35,6 +37,8 @@ export interface MultiEngineInput {
   efficiency: number;
   houseLoadFactor: number;
   feedInTariffPerKwh: number;
+  maxSoc?: number; // %, cap for opportunistic cheap charging (default 100)
+  cheapPriceThresholdPerKwh?: number | null; // charge below this effective cost even without target need
 }
 
 export interface PlanSlot {
@@ -44,6 +48,7 @@ export interface PlanSlot {
   cost: number; // EUR for this hour
   source: "grid" | "solar" | "mixed";
   effectiveCostPerKwh: number;
+  reason: "target" | "cheap"; // why this hour is charging: needed for a target, or opportunistically cheap
 }
 
 export interface PlanResult {
@@ -51,6 +56,7 @@ export interface PlanResult {
   feasible: boolean;
   energyNeededKwh: number; // into battery, across all deadlines
   scheduledKwh: number;
+  cheapKwh: number; // portion of scheduledKwh charged opportunistically (below the cheap-price threshold, not needed for a target)
   shortfallKwh: number;
   totalCost: number;
   chargingNow: boolean;
@@ -112,6 +118,8 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
     efficiency,
     houseLoadFactor,
     feedInTariffPerKwh,
+    maxSoc = 100,
+    cheapPriceThresholdPerKwh = null,
   } = input;
 
   const nowHour = new Date(now);
@@ -163,8 +171,32 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
     });
   }
 
+  // kWh already allocated per hour for target need, before any opportunistic top-up.
+  const targetUsedByHour = new Map<number, number>();
+  for (const [t, m] of metrics) targetUsedByHour.set(t, m.batteryCapKwh - m.remainingBatteryKwh);
+
+  // Opportunistic cheap-price charging: fill remaining headroom (up to maxSoc) with any
+  // hour whose effective cost/kWh is at or below the threshold, even without target need.
+  if (cheapPriceThresholdPerKwh != null) {
+    const capKwh = (Math.max(0, Math.min(100, maxSoc)) / 100) * batteryKwh;
+    let headroom = Math.max(0, capKwh - projectedBatteryKwh);
+    if (headroom > 1e-6) {
+      const cheapCandidates = [...metrics.values()]
+        .filter((m) => m.remainingBatteryKwh > 1e-6 && m.effectiveCostPerKwh <= cheapPriceThresholdPerKwh)
+        .sort((a, b) => rank(a) - rank(b));
+      for (const m of cheapCandidates) {
+        if (headroom <= 1e-6) break;
+        const take = Math.min(m.remainingBatteryKwh, headroom);
+        m.remainingBatteryKwh -= take;
+        projectedBatteryKwh += take;
+        headroom -= take;
+      }
+    }
+  }
+
   // Build chronological slots from what was allocated (batteryCap - remaining).
   let scheduledKwh = 0;
+  let cheapKwh = 0;
   let totalCost = 0;
   const slots: PlanSlot[] = [...metrics.values()]
     .sort((a, b) => a.hour.hourStart.getTime() - b.hour.hourStart.getTime())
@@ -173,12 +205,19 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
       const on = used > 1e-6;
       const fraction = m.batteryCapKwh > 0 ? used / m.batteryCapKwh : 0;
       const cost = m.hourCostFull * fraction;
+      const targetUsed = targetUsedByHour.get(m.hour.hourStart.getTime()) ?? 0;
+      const cheapUsed = Math.max(0, used - targetUsed);
       if (on) {
         scheduledKwh += used;
         totalCost += cost;
+        if (targetUsed <= 1e-6) cheapKwh += cheapUsed;
       }
       const source: PlanSlot["source"] =
         m.solarKwhFull <= 1e-6 ? "grid" : m.gridKwhFull <= 1e-6 ? "solar" : "mixed";
+      // Only label a slot "cheap" when none of it is actually needed for a target —
+      // a hour that's already required stays labelled "target" even if some slack
+      // capacity in it also happens to clear the threshold.
+      const reason: PlanSlot["reason"] = targetUsed <= 1e-6 && cheapUsed > 1e-6 ? "cheap" : "target";
       return {
         hourStart: m.hour.hourStart,
         on,
@@ -186,6 +225,7 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
         cost,
         source,
         effectiveCostPerKwh: m.effectiveCostPerKwh,
+        reason,
       };
     });
 
@@ -197,12 +237,15 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
   const next = sortedDeadlines[0];
 
   let reason: string;
-  if (energyNeededTotal <= 1e-6) {
+  if (energyNeededTotal <= 1e-6 && cheapKwh <= 1e-6) {
     reason = "Already at/above every upcoming target.";
   } else if (feasible) {
     reason = `Charging ${scheduledKwh.toFixed(1)} kWh across ${onSet.size} h for ~€${totalCost.toFixed(
       2
     )} to meet ${sortedDeadlines.length} deadline${sortedDeadlines.length > 1 ? "s" : ""}.`;
+    if (cheapKwh > 1e-6) {
+      reason += ` +${cheapKwh.toFixed(1)} kWh opportunistic (below €${cheapPriceThresholdPerKwh?.toFixed(3)}/kWh).`;
+    }
   } else {
     reason = `Not enough home hours: short ${shortfallKwh.toFixed(
       1
@@ -214,6 +257,7 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
     feasible,
     energyNeededKwh: energyNeededTotal,
     scheduledKwh,
+    cheapKwh,
     shortfallKwh,
     totalCost,
     chargingNow,
@@ -236,5 +280,7 @@ export function computePlan(input: EngineInput): PlanResult {
     efficiency: input.efficiency,
     houseLoadFactor: input.houseLoadFactor,
     feedInTariffPerKwh: input.feedInTariffPerKwh,
+    maxSoc: input.maxSoc,
+    cheapPriceThresholdPerKwh: input.cheapPriceThresholdPerKwh,
   });
 }

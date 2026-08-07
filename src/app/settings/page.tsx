@@ -77,6 +77,20 @@ export default async function SettingsPage() {
             />
             <Field label="History days shown" name="historyDays" defaultValue={s.historyDays} step="1" />
           </div>
+          <p className="mb-2 mt-4 text-xs text-[var(--color-muted)]">
+            Cheap-price charging: on sunny/low-price hours it can be worth charging the car even with
+            no target to reach yet, rather than exporting solar for little or nothing. When an hour&apos;s
+            effective cost/kWh drops at or below this threshold, the planner charges opportunistically
+            (capped at the car&apos;s Max SoC). Leave blank to disable.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field
+              label="Cheap-price threshold (EUR/kWh)"
+              name="cheapPriceThresholdPerKwh"
+              defaultValue={s.cheapPriceThresholdPerKwh ?? ""}
+              step="0.001"
+            />
+          </div>
         </section>
 
         <section>

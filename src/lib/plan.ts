@@ -12,8 +12,8 @@ import {
   todayISO,
 } from "./time";
 
-// Plan across today + tomorrow + the following morning's deadline, so the whole
-// visible timeline is scheduled (not just the immediate next deadline).
+// Look far enough ahead to see the deadline after tomorrow (so it shows up once its
+// prices land), but planning itself is further capped to the known-price horizon below.
 const DEADLINE_LOOKAHEAD_DAYS = 3;
 
 /** All deadline instants after `now` within the lookahead, with their targets. */
@@ -39,8 +39,21 @@ export async function recomputePlan(nowOverride?: Date) {
   const now = resolveNow(settings.simulatedNow, nowOverride);
   const nowHour = floorToHour(now);
 
-  const deadlines = await upcomingDeadlines(now, tz);
+  // Prices are day-ahead: only today + tomorrow are ever known. Only plan deadlines
+  // that fall within that window — a deadline further out (e.g. the morning after
+  // tomorrow) can't be scheduled sensibly yet since we don't know its hours' prices,
+  // so leave it out of the engine until the next daily refresh rolls this window
+  // forward and it comes into range. It still shows on the timeline as a target.
+  const today = todayISO(tz, now);
+  const hoursEnd = localDayStartUTC(addDaysISO(today, 2), tz);
+  const allDeadlines = await upcomingDeadlines(now, tz);
+  const deadlines = allDeadlines.filter((d) => d.instant.getTime() <= hoursEnd.getTime());
+
   if (deadlines.length === 0) {
+    const reason =
+      allDeadlines.length > 0
+        ? "Next deadline's day-ahead prices aren't published yet — plan resumes once available."
+        : "No upcoming deadline configured.";
     await prisma.$transaction([
       prisma.chargeSlot.deleteMany({}),
       prisma.planState.update({
@@ -52,7 +65,7 @@ export async function recomputePlan(nowOverride?: Date) {
           targetSoc: null,
           feasible: true,
           shortfallKwh: 0,
-          reason: "No upcoming deadline configured.",
+          reason,
         },
       }),
     ]);
@@ -60,9 +73,6 @@ export async function recomputePlan(nowOverride?: Date) {
   }
 
   // Build priced hours from now to the end of tomorrow (prices only cover today+tomorrow).
-  // A deadline the morning after still draws on these hours as candidates.
-  const today = todayISO(tz, now);
-  const hoursEnd = localDayStartUTC(addDaysISO(today, 2), tz);
   const [prices, solar] = await Promise.all([
     prisma.priceSnapshot.findMany({ where: { hourStart: { gte: nowHour, lt: hoursEnd } } }),
     prisma.solarForecast.findMany({ where: { hourStart: { gte: nowHour, lt: hoursEnd } } }),
@@ -110,6 +120,8 @@ export async function recomputePlan(nowOverride?: Date) {
     efficiency: car.efficiency,
     houseLoadFactor: settings.houseLoadFactor,
     feedInTariffPerKwh: settings.feedInTariffPerKwh,
+    maxSoc: car.maxSoc,
+    cheapPriceThresholdPerKwh: settings.cheapPriceThresholdPerKwh,
   });
 
   // chargingUntil = end of the contiguous on-run starting at now.
@@ -133,6 +145,7 @@ export async function recomputePlan(nowOverride?: Date) {
           expectedKwh: s.kwh,
           expectedCost: s.cost,
           source: s.source,
+          reason: s.reason,
         })),
     }),
     prisma.planState.update({

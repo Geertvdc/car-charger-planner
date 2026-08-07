@@ -21,6 +21,7 @@ export interface TimelineHour {
   planned: boolean;
   plannedKwh: number;
   plannedSource: string | null;
+  plannedReason: string | null; // target | cheap
   actual: boolean | null;
   isPast: boolean;
 }
@@ -139,6 +140,7 @@ export async function buildTimeline(nowOverride?: Date): Promise<TimelineData> {
       planned: slot?.on ?? false,
       plannedKwh: slot?.expectedKwh ?? 0,
       plannedSource: slot?.source ?? null,
+      plannedReason: slot?.reason ?? null,
       actual: isPast ? actualAt(t) : null,
       isPast,
     });

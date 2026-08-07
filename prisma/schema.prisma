@@ -25,6 +25,9 @@ model Settings {
   feedInTariffPerKwh Float    @default(0.0)
   // Fraction of forecast PV assumed available to the car (rest is house load). 0..1
   houseLoadFactor    Float    @default(0.7)
+  // Opportunistic charging: when an hour's effective cost/kWh drops at or below this,
+  // charge even without a target need (capped at CarConfig.maxSoc). Null disables it.
+  cheapPriceThresholdPerKwh Float?
   historyDays        Int      @default(3)
   haToken            String   @default("")
   // When set, the planner/timeline/HA treat this instant as "now" (simulation mode).
@@ -112,6 +115,7 @@ model ChargeSlot {
   expectedKwh Float    @default(0)
   expectedCost Float   @default(0)
   source      String   @default("grid") // grid | solar | mixed
+  reason      String   @default("target") // target | cheap — why this hour was scheduled
 }
 
 model PlanState {

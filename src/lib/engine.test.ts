@@ -157,6 +157,63 @@ describe("computePlan", () => {
     expect(on).toContain("2026-01-01T14:00:00.000Z");
   });
 
+  it("charges opportunistically below the cheap-price threshold even without target need", () => {
+    // Already at target (60%), but one hour is dirt cheap and threshold is set.
+    const hours: EngineHour[] = [
+      hour("2026-01-01T20:00:00Z", 0.02, 0, "DEFINITE"), // below threshold
+      hour("2026-01-01T21:00:00Z", 0.3, 0, "DEFINITE"), // above threshold
+    ];
+    const r = computePlan({
+      ...base,
+      currentSoc: 60,
+      targetSoc: 60,
+      maxSoc: 90,
+      cheapPriceThresholdPerKwh: 0.05,
+      horizonEnd: H("2026-01-01T22:00:00Z"),
+      hours,
+    });
+    expect(r.energyNeededKwh).toBe(0);
+    const on = r.slots.filter((s) => s.on);
+    expect(on).toHaveLength(1);
+    expect(on[0].hourStart.toISOString()).toBe("2026-01-01T20:00:00.000Z");
+    expect(on[0].reason).toBe("cheap");
+    expect(r.cheapKwh).toBeGreaterThan(0);
+  });
+
+  it("caps opportunistic cheap charging at maxSoc", () => {
+    // 60% -> 90% cap = 18 kWh headroom; two 10 kWh cheap hours available, only 18 kWh used.
+    const hours: EngineHour[] = [
+      hour("2026-01-01T20:00:00Z", 0.01, 0, "DEFINITE"),
+      hour("2026-01-01T21:00:00Z", 0.01, 0, "DEFINITE"),
+    ];
+    const r = computePlan({
+      ...base,
+      currentSoc: 60,
+      targetSoc: 60,
+      maxSoc: 90,
+      cheapPriceThresholdPerKwh: 0.05,
+      horizonEnd: H("2026-01-01T22:00:00Z"),
+      hours,
+    });
+    expect(r.cheapKwh).toBeCloseTo(18, 5);
+    expect(r.scheduledKwh).toBeCloseTo(18, 5);
+  });
+
+  it("does not mark a target-required hour as cheap even if it also clears the threshold", () => {
+    const hours: EngineHour[] = [hour("2026-01-01T20:00:00Z", 0.02, 0, "DEFINITE")];
+    const r = computePlan({
+      ...base,
+      currentSoc: 50,
+      targetSoc: 51.66666, // ~1 kWh needed, less than the hour's 10 kWh cap
+      cheapPriceThresholdPerKwh: 0.05,
+      horizonEnd: H("2026-01-01T21:00:00Z"),
+      hours,
+    });
+    const on = r.slots.filter((s) => s.on);
+    expect(on).toHaveLength(1);
+    expect(on[0].reason).toBe("target");
+  });
+
   it("does nothing when already at target", () => {
     const r = computePlan({
       ...base,

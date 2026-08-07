@@ -351,9 +351,14 @@ function DayChart({
           <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="var(--color-solar)" strokeWidth={1.5} />
         )}
 
-        {/* planned charge band */}
-        {day.hours.map((h, i) =>
-          h.planned ? (
+        {/* planned charge band — amber for target charging, green for opportunistic
+            cheap-price charging (below the threshold, not needed for a target) */}
+        {day.hours.map((h, i) => {
+          if (!h.planned) return null;
+          const cheap = h.plannedReason === "cheap";
+          const color = cheap ? "var(--color-charge-cheap)" : "var(--color-charge)";
+          const glow = cheap ? "rgba(46,158,110,0.6)" : "rgba(255,201,77,0.6)";
+          return (
             <rect
               key={`c-${i}`}
               x={xFor(i) + 1}
@@ -361,12 +366,12 @@ function DayChart({
               width={COL - 2}
               height={CHARGE_H}
               rx={3}
-              fill="var(--color-charge)"
+              fill={color}
               opacity={0.9}
-              style={{ filter: "drop-shadow(0 0 6px rgba(255,201,77,0.6))" }}
+              style={{ filter: `drop-shadow(0 0 6px ${glow})` }}
             />
-          ) : null
-        )}
+          );
+        })}
         {/* actual charge (history) outline */}
         {day.hours.map((h, i) =>
           h.actual ? (
@@ -525,7 +530,8 @@ function Legend() {
     ["var(--color-mid)", "mid"],
     ["var(--color-expensive)", "expensive"],
     ["var(--color-solar)", "solar"],
-    ["var(--color-charge)", "charging"],
+    ["var(--color-charge)", "charging (target)"],
+    ["var(--color-charge-cheap)", "charging (cheap)"],
     ["rgba(94,200,255,0.32)", "home"],
   ];
   return (
@@ -553,7 +559,9 @@ function HoverInfo({ hover }: { hover: { h: TimelineHour; day: string } | null }
       <span className="font-sans text-[var(--color-muted)]">{day}</span> {String(h.localHour).padStart(2, "0")}:00 ·{" "}
       {h.allInPrice != null ? `€${h.allInPrice.toFixed(3)}/kWh` : "no price"} · ☀ {(h.solarWh / 1000).toFixed(2)} kWh ·{" "}
       {h.availability.toLowerCase()}
-      {h.planned ? ` · charging ${h.plannedKwh.toFixed(1)} kWh` : ""}
+      {h.planned
+        ? ` · charging ${h.plannedKwh.toFixed(1)} kWh (${h.plannedReason === "cheap" ? "cheap" : "target"})`
+        : ""}
     </div>
   );
 }
