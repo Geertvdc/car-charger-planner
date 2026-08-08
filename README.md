@@ -1,16 +1,94 @@
 # Car Charger Planner
 
-Self-hosted web app that plans when to charge your EV at home in the Netherlands,
-optimizing for **dynamic energy prices** (EPEX via EnergyZero) and **self-consumed
-solar** (Forecast.Solar), while respecting **when you're actually home** and a
-**morning readiness target** (car X% full by a deadline).
+A self-hosted web app that decides **when to charge your EV at home**, optimizing for
+**dynamic energy prices** (EPEX via EnergyZero) and **self-consumed solar**
+(Forecast.Solar), while respecting **when you're actually home** and a **morning
+readiness target** (e.g. "80% by 07:00 on weekdays").
 
-The app is the brain and the active controller: it talks to your **Home Assistant**
-instance directly over HA's REST API, pushing the charger on/off decision itself
-whenever the plan is (re)computed — no HA automation required. (A legacy poll-based
-mode still exists if you'd rather not grant the app write access to HA.)
+It talks to **Home Assistant** over HA's REST API and pushes the charger on/off
+decision itself whenever the plan is (re)computed — no HA automation required, though a
+poll-based fallback exists if you'd rather not grant it write access.
 
-![dashboard](docs/dashboard.png)
+## Why this exists
+
+I have a dynamic energy contract, solar panels, and an EV, in the Netherlands. The
+actual problem is small and specific:
+
+- Charge as much as possible from **cheap grid hours and my own solar**, not whatever
+  the wallbox's stock "smart charging" mode decides.
+- Guarantee the car is at a **target % by the time I actually need it** the next
+  morning — a pure cost-minimizer that ignores deadlines isn't safe to trust unattended.
+- Only schedule charging during hours I'm **actually home** — my week isn't the same
+  every day (some days at the office, some days home from early afternoon), so "home"
+  needs to be a schedule, not a toggle.
+- Optionally top up opportunistically when the price is simply very cheap, even without
+  a deadline forcing it.
+
+That's the whole problem. Everything in this app is built to solve exactly that, and
+nothing more.
+
+## Why not just use evcc?
+
+[evcc](https://evcc.io) is a mature, widely-used open-source EV charge controller and
+the right default choice for most people — it supports a large matrix of wallboxes,
+inverters, meters, and vehicles out of the box, with no coding required. Before writing
+this, that's the obvious alternative to rule out first.
+
+For this use case, it was a worse fit for a few specific reasons:
+
+- **Home Assistant was already the integration hub.** My charger, power meter, and car
+  SoC are all HA entities already (via existing HA integrations, e.g.
+  [custom-components/zaptec](https://github.com/custom-components/zaptec)). evcc wants
+  to own the charger/meter/vehicle integration layer itself; bridging that back through
+  HA just to reuse entities I already had was more indirection than value.
+- **"Home vs. away" isn't in evcc's model.** evcc plans around price/solar and a target
+  SoC/time, but it has no first-class concept of a weekly availability pattern with
+  per-day overrides. That's not a minor gap for a household where "home" changes by day
+  of the week — it's the actual constraint that makes or breaks a plan, and working
+  around its absence would mean building most of this app on top of evcc anyway.
+- **Single car, single charger, single home.** evcc's config surface (loadpoints,
+  multiple vehicles, multiple meters, tariff adapters, MQTT/EEBus/OCPP wiring) is built
+  to be generic across setups. None of that generality was needed here, and a large
+  config surface is itself a maintenance cost — every option is something that can be
+  misconfigured or need updating when I don't need it.
+
+The short version: evcc solves the general problem well. This app solves one narrow
+problem — a single EV, a single home, a weekly presence schedule, and a hard morning
+deadline — with a data model and scheduler built around exactly those constraints, and
+nothing that isn't. If your setup is more generic (multiple EVs, multiple wallboxes,
+no fixed weekly schedule), use evcc instead.
+
+## Design choices
+
+- **Narrow scope over generality.** One car, one charger, one home, one Home Assistant
+  instance. No multi-vehicle or multi-loadpoint support — that's a deliberate
+  non-goal, not a missing feature.
+- **The app is the controller, not just an advisor.** It pushes on/off decisions to HA
+  directly (`switch.turn_on`/`turn_off` on a configured entity) whenever the plan is
+  recomputed, rather than only displaying a recommendation someone has to act on. A
+  legacy poll-based mode (HA polls a `/api/ha/state` endpoint and flips the switch
+  itself) is kept for anyone who'd rather not grant write access.
+  See [How the plan is computed](#how-the-plan-is-computed) and
+  [Home Assistant integration](#home-assistant-integration).
+- **Home/away is a first-class weekly schedule, not a toggle.** A weekly template
+  (per-weekday home windows + a morning deadline/target) plus per-date overrides for
+  days that diverge — because a real week isn't "always home" or "always away".
+- **Multiple deadlines, not just "the next one".** The scheduler looks across every
+  upcoming deadline in the visible horizon and satisfies them in order, so a cheap
+  afternoon two days out gets used ahead of an expensive night if that's genuinely
+  optimal — see [engine.ts](src/lib/engine.ts).
+- **Solar valued at its real opportunity cost.** Forecast solar is treated as "free"
+  minus the feed-in tariff you'd otherwise earn by exporting it — not simply free.
+- **Read-only signals stay read-only.** Car SoC and a HomeWizard power reading can be
+  pulled from HA for display/estimation, but the only thing the app ever writes back to
+  HA is the charger on/off command.
+- **A simulation mode that can't touch real hardware.** The dashboard can fast-forward
+  "now" to test the planner at any time of day, but pushes to the real charger are
+  hard-disabled whenever a simulated time is set — see
+  [Simulation mode](#simulation-mode).
+- **Boring, self-hostable stack.** Next.js + SQLite in one container, no external
+  database, message queue, or cloud dependency beyond the public price/solar/geocoding
+  APIs it calls.
 
 ## Features
 
@@ -20,18 +98,24 @@ mode still exists if you'd rather not grant the app write access to HA.)
 - **Weekly availability template** — e.g. Mon home, Tue/Thu at the office, Wed home
   from 15:00 — plus per-day **overrides** for upcoming days that diverge.
 - **Cost + solar aware scheduler** — meets each morning target at the lowest cost using
-  home hours only. Flags when a target can't be met before the deadline.
+  home hours only, across all upcoming deadlines at once. Flags when a target can't be
+  met before the deadline.
+- **Opportunistic cheap-price charging** — optionally top up below a configured
+  effective cost/kWh even without a deadline forcing it, capped at a max SoC.
 - **Charger-connected override** — if HA reports a car physically plugged in, the
   current hour counts as home even if the schedule says away.
 - **Direct Home Assistant control** — the app pushes charger on/off to HA via its REST
-  API (`switch.turn_on`/`turn_off` on a configured entity) whenever the plan changes.
-  Legacy poll endpoints (`/api/ha/switch`, `/api/ha/state`) remain available as a
+  API whenever the plan changes. Legacy poll endpoints remain available as a
   read-only/manual-fallback surface, guarded by a bearer token.
+- **Simulation mode** — fast-forward "now" to test the planner at any time of day
+  without touching real hardware.
 
 ## Tech
 
-Next.js (App Router, TS) · Prisma + SQLite · Tailwind v4 · Vitest. Data refresh + plan
-recompute run in-process on an interval (Next instrumentation hook).
+Next.js (App Router, TypeScript) · Prisma + SQLite · Tailwind v4 · Vitest. Data refresh
+and plan recompute run in-process on an interval via the Next.js instrumentation hook —
+no separate scheduler service required (though one can be split out, see
+[Architecture](#architecture)).
 
 ## Run locally
 
@@ -57,11 +141,13 @@ HA_API_TOKEN=your-secret docker compose up --build
 
 ## Configure
 
-1. **Settings** — location (type a place name, e.g. "Uden, Netherlands" — it's geocoded to
-   coordinates + timezone; manual lat/lon override available), price make-up to match your
-   dynamic contract, solar-usable factor, and Home Assistant connection (see below).
+1. **Settings** — location (type a place name, e.g. "Uden, Netherlands" — it's geocoded
+   to coordinates + timezone; manual lat/lon override available), price make-up to
+   match your dynamic contract, solar-usable factor, and Home Assistant connection (see
+   below).
 2. **Car & solar** — battery kWh, charger kW, efficiency; one PV string per roof plane.
-3. **Weekly schedule** — home windows (simple home/away) + morning target % per weekday.
+3. **Weekly schedule** — home windows (simple home/away) + morning target % per
+   weekday.
 4. **Upcoming days** — diverge from the template on specific dates (or mark "away").
 5. **Dashboard** — hit **Refresh data & plan**.
 
@@ -69,12 +155,12 @@ HA_API_TOKEN=your-secret docker compose up --build
 
 The **🧪 Simulation** bar on the dashboard overrides "now" so you can test the planner at
 any time of day without waiting for the real clock. Set an exact date/time, step by
-±15 min / ±1 h, and watch the plan, timeline, and charge decision update. The planner and
-timeline treat the simulated instant as now — but **pushes to the real charger are
+±15 min / ±1 h, and watch the plan, timeline, and charge decision update. The planner
+and timeline treat the simulated instant as now — but **pushes to the real charger are
 disabled while simulating** (`syncChargerState` no-ops whenever `Settings.simulatedNow`
 is set), so testing the plan can never accidentally flip your real hardware. Click
-**Back to live** to return to the real clock and resume control. Only today/tomorrow have
-price & solar data, so keep the simulated time within that window.
+**Back to live** to return to the real clock and resume control. Only today/tomorrow
+have price & solar data, so keep the simulated time within that window.
 
 Note: the legacy poll-based mode is *not* covered by this guard — if HA is polling
 `/api/ha/state`/`/api/ha/switch` itself, it will still receive the simulated decision.
@@ -191,20 +277,76 @@ solar, the planner falls back to the cheapest hours it *can* reach (often overni
 the charger reports a car physically connected (see below), the current hour counts as
 home regardless of the schedule — you're clearly there.
 
+If a `cheapPriceThreshold` is configured, any remaining headroom up to a max SoC is
+additionally filled opportunistically wherever the effective cost/kWh drops at or below
+that threshold, even without a deadline requiring it.
+
+## Architecture
+
+```
+src/
+  app/                 Next.js App Router — pages (dashboard, settings, schedule,
+                        upcoming, config) + server actions (app/actions.ts) + API routes
+                        under app/api/ (HA poll endpoints, manual SoC entry, refresh,
+                        simulation, day overrides)
+  components/          Client-side UI (timeline, stat tiles, simulation bar, nav)
+  lib/
+    engine.ts           Pure scheduling algorithm: hours + deadlines + config -> PlanResult
+    plan.ts              Wires engine.ts to the DB — loads state, calls the engine,
+                          persists PlanState/ChargeSlot, syncs the decision to HA
+    refresh.ts           Pulls fresh data: EPEX prices, solar forecast, HA power/SoC/
+                          charger-connected sensors
+    scheduler.ts         In-process interval loop: refresh every 30 min, advance/
+                          recompute the plan every 10 min
+    ha-client.ts          Low-level HA REST client (get entity state, call a service)
+    ha-control.ts         syncChargerState() — diffs desired vs. last-pushed state,
+                           calls HA only on change, records PlanState.haSync*
+    energyzero.ts         EPEX day-ahead price fetch (EnergyZero API)
+    forecastsolar.ts      PV production forecast (Forecast.Solar API), per PV string
+    geocode.ts             Place name -> lat/lon/timezone (Open-Meteo)
+    availability.ts         Weekly template + day overrides -> home/away per hour
+    pricing.ts, time.ts, now.ts   All-in price calc, timezone-aware date helpers,
+                                   simulated-vs-real "now"
+  worker/index.ts        Optional standalone entrypoint that just calls
+                          startScheduler() — for running the scheduler in a separate
+                          container instead of in-process (set DISABLE_SCHEDULER=1 on
+                          the web container if you split it out this way)
+  instrumentation.ts      Next.js hook: runs once on server boot, ensures the
+                          singleton Settings/CarConfig/PlanState rows exist, then
+                          starts the in-process scheduler (unless DISABLE_SCHEDULER=1)
+prisma/schema.prisma    Data model — see inline comments for every field
+```
+
+**Data flow, once running:** the scheduler (`scheduler.ts`) refreshes prices/solar/HA
+sensors on an interval (`refresh.ts`) → `plan.ts` calls the pure engine (`engine.ts`)
+with the current settings, weekly/override schedule, and fetched data → the resulting
+plan is persisted (`PlanState`, `ChargeSlot`) → `ha-control.ts` pushes the on/off
+decision to Home Assistant if it changed. The same `recomputePlan()` path also runs
+synchronously after any settings/schedule change made in the UI, so edits take effect
+immediately rather than waiting for the next tick.
+
+The engine itself (`engine.ts`) is deliberately pure — no DB, no HA, no dates outside
+its input — which is what makes it unit-testable without any of the surrounding
+plumbing; see [engine.test.ts](src/lib/engine.test.ts).
+
+**Single-instance app.** Settings/CarConfig/PlanState are singleton rows (`id = 1`) —
+this app is built for one household, not multi-tenant use.
+
 ## Tests
 
 ```bash
-npm test      # engine unit tests (cheapest-hours, solar preference, feasibility)
+npm test      # engine, availability, refresh, and HA client/control unit tests
 ```
 
 ## Notes / roadmap
 
-- Current SoC can now be read from a car sensor via HA (see below) as well as entered
-  manually — a manual entry still always wins until the car itself reports a newer
-  reading.
-- HomeWizard power-meter data is read via HA and shown on the dashboard (see below);
-  not yet wired into the planning engine — the engine still schedules from the
-  Forecast.Solar prediction, not live power readings.
 - Charger control is on/off; modulating amps/target-power could be added to the engine
   and the HA push.
 - Historical prices accumulate as the app runs (EnergyZero serves today + tomorrow).
+- HomeWizard power-meter data is read via HA and shown on the dashboard but not yet
+  wired into the planning engine — the engine still schedules from the Forecast.Solar
+  prediction, not live power readings.
+
+## License
+
+[MIT](LICENSE)

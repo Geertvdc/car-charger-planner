@@ -2,6 +2,12 @@
   "name": "car-charger-planner",
   "version": "0.1.0",
   "private": true,
+  "description": "Self-hosted planner that charges your EV on cheap dynamic-price/solar hours while meeting a morning readiness target, respecting a weekly home/away schedule, and controlling the charger via Home Assistant.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Geertvdc/car-charger-planner.git"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
