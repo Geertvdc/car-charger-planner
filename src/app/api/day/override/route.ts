@@ -6,7 +6,7 @@ import { recomputePlan } from "@/lib/plan";
 // Edits made directly on the dashboard timeline for a single upcoming day.
 // Both parts write to that date's DayOverride (creating it if needed) so they
 // diverge from the weekly template without touching it.
-const statusEnum = z.enum(["DEFINITE", "MAYBE", "AWAY"]);
+const statusEnum = z.enum(["HOME", "AWAY"]);
 const schema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   // Draggable morning-readiness target.
@@ -23,11 +23,11 @@ const schema = z.object({
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** Merge per-hour statuses into contiguous home windows (AWAY hours produce no window). */
-function buildWindows(entries: { hour: number; status: "DEFINITE" | "MAYBE" | "AWAY" }[]) {
-  const byHour = new Map<number, "DEFINITE" | "MAYBE" | "AWAY">();
+function buildWindows(entries: { hour: number; status: "HOME" | "AWAY" }[]) {
+  const byHour = new Map<number, "HOME" | "AWAY">();
   for (const e of entries) byHour.set(e.hour, e.status);
 
-  const windows: { startTime: string; endTime: string; status: string }[] = [];
+  const windows: { startTime: string; endTime: string }[] = [];
   let h = 0;
   while (h < 24) {
     const s = byHour.get(h) ?? "AWAY";
@@ -36,11 +36,10 @@ function buildWindows(entries: { hour: number; status: "DEFINITE" | "MAYBE" | "A
       continue;
     }
     let end = h;
-    while (end + 1 < 24 && (byHour.get(end + 1) ?? "AWAY") === s) end++;
+    while (end + 1 < 24 && (byHour.get(end + 1) ?? "AWAY") === "HOME") end++;
     windows.push({
       startTime: `${pad(h)}:00`,
       endTime: end >= 23 ? "23:59" : `${pad(end + 1)}:00`,
-      status: s,
     });
     h = end + 1;
   }

@@ -3,15 +3,13 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 // dayOfWeek: 0=Monday .. 6=Sunday
-const DEFINITE = "DEFINITE";
-const MAYBE = "MAYBE";
 
 // Home overnight windows reused for "office" days.
 const overnight = [
-  { startTime: "00:00", endTime: "08:00", status: DEFINITE },
-  { startTime: "17:30", endTime: "23:59", status: DEFINITE },
+  { startTime: "00:00", endTime: "08:00" },
+  { startTime: "17:30", endTime: "23:59" },
 ];
-const allDay = [{ startTime: "00:00", endTime: "23:59", status: DEFINITE }];
+const allDay = [{ startTime: "00:00", endTime: "23:59" }];
 
 const template: Record<
   number,
@@ -23,17 +21,13 @@ const template: Record<
     deadlineTime: "07:00",
     targetSoc: 80,
     windows: [
-      { startTime: "00:00", endTime: "08:00", status: DEFINITE },
-      { startTime: "15:00", endTime: "23:59", status: DEFINITE },
+      { startTime: "00:00", endTime: "08:00" },
+      { startTime: "15:00", endTime: "23:59" },
     ],
   }, // Wed: home from ~15:00
   3: { deadlineTime: "07:00", targetSoc: 80, windows: overnight }, // Thu: office
   4: { deadlineTime: "08:00", targetSoc: 80, windows: allDay }, // Fri: home
-  5: {
-    deadlineTime: "09:00",
-    targetSoc: 70,
-    windows: [{ startTime: "00:00", endTime: "23:59", status: MAYBE }],
-  }, // Sat: maybe home
+  5: { deadlineTime: "09:00", targetSoc: 70, windows: allDay }, // Sat: home
   6: { deadlineTime: "07:00", targetSoc: 90, windows: allDay }, // Sun: home, ready for the week
 };
 

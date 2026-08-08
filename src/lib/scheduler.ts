@@ -1,4 +1,4 @@
-import { refreshAll } from "./refresh";
+import { refreshAll, refreshChargerConnected } from "./refresh";
 import { recomputePlan } from "./plan";
 
 const g = globalThis as unknown as {
@@ -28,7 +28,17 @@ export function startScheduler(): void {
 
   g.__chargerTimers.push(setInterval(() => run("refresh", () => refreshAll()), REFRESH_MS));
   g.__chargerTimers.push(
-    setInterval(() => run("recompute", () => recomputePlan()), RECOMPUTE_MS)
+    setInterval(
+      () =>
+        run("recompute", async () => {
+          // Background-only HA read (not in the interactive recomputePlan() path) so
+          // "charger connected" stays fresh within ~10 min without adding a live HA
+          // round-trip to every settings save / timeline edit.
+          await refreshChargerConnected().catch(() => undefined);
+          return recomputePlan();
+        }),
+      RECOMPUTE_MS
+    )
   );
 
   console.log("[scheduler] started");

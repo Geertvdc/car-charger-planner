@@ -1,0 +1,257 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const settingsFindUniqueOrThrow = vi.fn();
+const powerReadingCreate = vi.fn();
+const carStateFindFirst = vi.fn();
+const carStateCreate = vi.fn();
+const planStateUpdate = vi.fn();
+vi.mock("./db", () => ({
+  prisma: {
+    settings: { findUniqueOrThrow: (...args: unknown[]) => settingsFindUniqueOrThrow(...args) },
+    powerReading: { create: (...args: unknown[]) => powerReadingCreate(...args) },
+    carState: {
+      findFirst: (...args: unknown[]) => carStateFindFirst(...args),
+      create: (...args: unknown[]) => carStateCreate(...args),
+    },
+    planState: { update: (...args: unknown[]) => planStateUpdate(...args) },
+  },
+}));
+
+const getEntityState = vi.fn();
+vi.mock("./ha-client", () => ({
+  getEntityState: (...args: unknown[]) => getEntityState(...args),
+}));
+
+import { refreshCarSoc, refreshChargerConnected, refreshPower } from "./refresh";
+
+describe("refreshPower", () => {
+  beforeEach(() => {
+    settingsFindUniqueOrThrow.mockReset();
+    powerReadingCreate.mockReset().mockResolvedValue({});
+    getEntityState.mockReset();
+  });
+
+  it("no-ops when no power sensor entity is configured", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haPowerSensorEntityId: "" });
+    const result = await refreshPower();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(getEntityState).not.toHaveBeenCalled();
+  });
+
+  it("no-ops when HA returns no entity (not configured / not found)", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
+    });
+    getEntityState.mockResolvedValue(null);
+    const result = await refreshPower();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(powerReadingCreate).not.toHaveBeenCalled();
+  });
+
+  it("stores a PowerReading on a valid numeric reading", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
+    });
+    getEntityState.mockResolvedValue({ state: "1234.5", attributes: {}, last_changed: "" });
+    const result = await refreshPower();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(powerReadingCreate).toHaveBeenCalledWith({ data: { watts: 1234.5 } });
+  });
+
+  it("fails gracefully on a non-numeric HA state (e.g. 'unavailable')", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
+    });
+    getEntityState.mockResolvedValue({ state: "unavailable", attributes: {}, last_changed: "" });
+    const result = await refreshPower();
+    expect(result.ok).toBe(false);
+    expect(result.count).toBe(0);
+    expect(powerReadingCreate).not.toHaveBeenCalled();
+  });
+
+  it("returns ok:false without throwing when HA is unreachable", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
+    });
+    getEntityState.mockRejectedValue(new Error("fetch failed"));
+    const result = await refreshPower();
+    expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
+  });
+});
+
+describe("refreshCarSoc", () => {
+  beforeEach(() => {
+    settingsFindUniqueOrThrow.mockReset();
+    carStateFindFirst.mockReset();
+    carStateCreate.mockReset().mockResolvedValue({});
+    getEntityState.mockReset();
+  });
+
+  it("no-ops when no car SoC entity is configured", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "" });
+    const result = await refreshCarSoc();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(getEntityState).not.toHaveBeenCalled();
+  });
+
+  it("no-ops when HA returns no entity", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue(null);
+    const result = await refreshCarSoc();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(carStateCreate).not.toHaveBeenCalled();
+  });
+
+  it("inserts a CarState row on the first ha_car reading", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue({
+      state: "72",
+      attributes: {},
+      last_changed: "2026-08-07T10:00:00Z",
+    });
+    carStateFindFirst.mockResolvedValue(null);
+    const result = await refreshCarSoc();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(carStateCreate).toHaveBeenCalledWith({
+      data: { soc: 72, source: "ha_car", rawUpdatedAt: new Date("2026-08-07T10:00:00Z") },
+    });
+  });
+
+  it("no-ops (dedups) when last_changed hasn't advanced since the last ha_car reading", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue({
+      state: "72",
+      attributes: {},
+      last_changed: "2026-08-07T10:00:00Z",
+    });
+    carStateFindFirst.mockResolvedValue({ rawUpdatedAt: new Date("2026-08-07T10:00:00Z") });
+    const result = await refreshCarSoc();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(carStateCreate).not.toHaveBeenCalled();
+  });
+
+  it("inserts a new row once last_changed advances", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue({
+      state: "75",
+      attributes: {},
+      last_changed: "2026-08-07T12:00:00Z",
+    });
+    carStateFindFirst.mockResolvedValue({ rawUpdatedAt: new Date("2026-08-07T10:00:00Z") });
+    const result = await refreshCarSoc();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(carStateCreate).toHaveBeenCalledWith({
+      data: { soc: 75, source: "ha_car", rawUpdatedAt: new Date("2026-08-07T12:00:00Z") },
+    });
+  });
+
+  it("does not let a stale ha_car poll clobber a more recent manual entry (via dedup)", async () => {
+    // The manual entry itself lives in a separate CarState row with a newer `at`, which
+    // recomputePlan() already picks by `orderBy: at desc` regardless of source — this
+    // test only verifies refreshCarSoc() doesn't insert a duplicate ha_car row for an
+    // unchanged reading, which is the mechanism that keeps the manual row on top.
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue({
+      state: "72",
+      attributes: {},
+      last_changed: "2026-08-07T10:00:00Z",
+    });
+    carStateFindFirst.mockResolvedValue({ rawUpdatedAt: new Date("2026-08-07T10:00:00Z") });
+    await refreshCarSoc();
+    expect(carStateCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails gracefully on an implausible SoC (e.g. 'unavailable')", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue({
+      state: "unavailable",
+      attributes: {},
+      last_changed: "2026-08-07T10:00:00Z",
+    });
+    const result = await refreshCarSoc();
+    expect(result.ok).toBe(false);
+    expect(result.count).toBe(0);
+    expect(carStateCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails gracefully on an out-of-range SoC", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockResolvedValue({
+      state: "150",
+      attributes: {},
+      last_changed: "2026-08-07T10:00:00Z",
+    });
+    const result = await refreshCarSoc();
+    expect(result.ok).toBe(false);
+    expect(carStateCreate).not.toHaveBeenCalled();
+  });
+
+  it("returns ok:false without throwing when HA is unreachable", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haCarSocEntityId: "sensor.car_soc" });
+    getEntityState.mockRejectedValue(new Error("fetch failed"));
+    const result = await refreshCarSoc();
+    expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
+  });
+});
+
+describe("refreshChargerConnected", () => {
+  beforeEach(() => {
+    settingsFindUniqueOrThrow.mockReset();
+    getEntityState.mockReset();
+    planStateUpdate.mockReset().mockResolvedValue({});
+  });
+
+  it("no-ops when no connected entity is configured", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haChargerConnectedEntityId: "" });
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(getEntityState).not.toHaveBeenCalled();
+    expect(planStateUpdate).not.toHaveBeenCalled();
+  });
+
+  it("no-ops when HA returns no entity", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haChargerConnectedEntityId: "binary_sensor.zaptec_go_2_charger",
+    });
+    getEntityState.mockResolvedValue(null);
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(planStateUpdate).not.toHaveBeenCalled();
+  });
+
+  it("stores true when the entity reads 'on'", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haChargerConnectedEntityId: "binary_sensor.zaptec_go_2_charger",
+    });
+    getEntityState.mockResolvedValue({ state: "on", attributes: {}, last_changed: "" });
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { chargerConnected: true },
+    });
+  });
+
+  it("stores false when the entity reads anything other than 'on'", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haChargerConnectedEntityId: "binary_sensor.zaptec_go_2_charger",
+    });
+    getEntityState.mockResolvedValue({ state: "off", attributes: {}, last_changed: "" });
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { chargerConnected: false },
+    });
+  });
+
+  it("returns ok:false without throwing when HA is unreachable", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haChargerConnectedEntityId: "binary_sensor.zaptec_go_2_charger",
+    });
+    getEntityState.mockRejectedValue(new Error("fetch failed"));
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
+    expect(planStateUpdate).not.toHaveBeenCalled();
+  });
+});

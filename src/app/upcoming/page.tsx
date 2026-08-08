@@ -128,9 +128,7 @@ export default async function UpcomingPage() {
                       <span>
                         {w.startTime}–{w.endTime}
                       </span>
-                      <span className="text-xs text-[var(--color-muted)]">
-                        {w.status === "MAYBE" ? "maybe home" : "home"}
-                      </span>
+                      <span className="text-xs text-[var(--color-muted)]">home</span>
                       <form action={deleteWindow} className="ml-auto">
                         <input type="hidden" name="id" value={w.id} />
                         <button className="text-xs text-[var(--color-muted)] hover:text-[var(--color-expensive)]" type="submit">
@@ -150,13 +148,6 @@ export default async function UpcomingPage() {
                   <label className="block">
                     <span className="label">Until</span>
                     <input className="input w-24" type="time" name="endTime" defaultValue="23:59" />
-                  </label>
-                  <label className="block">
-                    <span className="label">Status</span>
-                    <select className="select w-28" name="status" defaultValue="DEFINITE">
-                      <option value="DEFINITE">Home</option>
-                      <option value="MAYBE">Maybe home</option>
-                    </select>
                   </label>
                   <button className="btn" type="submit">
                     + Add

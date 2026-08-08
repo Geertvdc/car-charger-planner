@@ -103,9 +103,9 @@ function metricsFor(
  * Cost- and solar-aware scheduler across multiple deadlines.
  * Deadlines are satisfied in chronological order; each uses the cheapest still-available
  * home hours in the whole span from now to that deadline (so a cheap afternoon the day
- * before is used ahead of an expensive night). DEFINITE-home hours are preferred; MAYBE
- * hours only cover a shortfall. Charge banked for an earlier deadline counts toward later
- * ones (no driving between deadlines is modelled — correct current SoC via the dashboard).
+ * before is used ahead of an expensive night). Charge banked for an earlier deadline
+ * counts toward later ones (no driving between deadlines is modelled — correct current
+ * SoC via the dashboard).
  */
 export function computeMultiPlan(input: MultiEngineInput): PlanResult {
   const {
@@ -135,8 +135,9 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
     );
   }
 
-  const rank = (m: HourMetrics) =>
-    (m.hour.availability === "DEFINITE" ? 0 : 1_000_000) + m.effectiveCostPerKwh;
+  // `metrics` already excludes AWAY hours (see above), so every candidate here is
+  // home — rank purely by effective cost.
+  const rank = (m: HourMetrics) => m.effectiveCostPerKwh;
 
   const sortedDeadlines = [...deadlines].sort((a, b) => a.instant.getTime() - b.instant.getTime());
 

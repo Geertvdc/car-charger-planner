@@ -29,7 +29,27 @@ model Settings {
   // charge even without a target need (capped at CarConfig.maxSoc). Null disables it.
   cheapPriceThresholdPerKwh Float?
   historyDays        Int      @default(3)
-  haToken            String   @default("")
+  haToken            String   @default("") // verifies INBOUND requests to /api/ha/* (legacy poll path)
+  // --- Outbound Home Assistant REST API client (this app -> HA) ---
+  haBaseUrl               String @default("") // e.g. http://homeassistant.local:8123, no trailing slash
+  haAccessToken            String @default("") // HA long-lived access token, sent as Bearer by this app
+  haChargerSwitchEntityId  String @default("") // e.g. switch.zaptec_go_2 — on/off control target
+  haChargerStatusEntityId  String @default("") // optional: sensor for charging power/status (read-only, display)
+  // HA service to call for each action, in "domain.service" notation. Defaults match a
+  // plain switch entity; override for integrations that expose charging control
+  // differently (e.g. a custom "zaptec.start_charging" service).
+  haChargerOnService       String @default("switch.turn_on")
+  haChargerOffService      String @default("switch.turn_off")
+  // HomeWizard power sensor entity read via HA (e.g. sensor.p1_meter_active_power_w).
+  // Read + stored for display only — not wired into the planning engine.
+  haPowerSensorEntityId    String @default("")
+  // Car SoC % sensor read via HA (e.g. the EU Data Act portal integration for Cupra/VW
+  // Group cars). Read-only, feeds CarState with source "ha_car" — see refreshCarSoc().
+  haCarSocEntityId         String @default("")
+  // Charger's "cable connected" binary_sensor (e.g. binary_sensor.zaptec_go_2_charger).
+  // When "on", the current hour is treated as home even if the schedule says away —
+  // see refreshChargerConnected() / PlanState.chargerConnected.
+  haChargerConnectedEntityId String @default("")
   // When set, the planner/timeline/HA treat this instant as "now" (simulation mode).
   simulatedNow       DateTime?
   updatedAt          DateTime @updatedAt @default(now())
@@ -77,7 +97,6 @@ model HomeWindow {
   id            Int          @id @default(autoincrement())
   startTime     String // HH:MM local
   endTime       String // HH:MM local
-  status        String       @default("DEFINITE") // DEFINITE | MAYBE
   weeklyDay     WeeklyDay?   @relation(fields: [weeklyDayId], references: [id], onDelete: Cascade)
   weeklyDayId   Int?
   dayOverride   DayOverride? @relation(fields: [dayOverrideId], references: [id], onDelete: Cascade)
@@ -87,10 +106,21 @@ model HomeWindow {
 // ---- Runtime / time-series state ----
 
 model CarState {
+  id           Int       @id @default(autoincrement())
+  soc          Int
+  at           DateTime  @default(now())
+  source       String    @default("manual") // manual | estimate | ha_car
+  // HA entity's own last_changed for ha_car rows — lets refreshCarSoc() dedup repeated
+  // stale polls instead of a genuinely new reading. Null for manual/estimate rows.
+  rawUpdatedAt DateTime?
+}
+
+// Instantaneous home power reading (e.g. HomeWizard P1 via HA) — display only.
+model PowerReading {
   id     Int      @id @default(autoincrement())
-  soc    Int
+  watts  Float
   at     DateTime @default(now())
-  source String   @default("manual") // manual | estimate
+  source String   @default("homewizard_ha")
 }
 
 model PriceSnapshot {
@@ -127,6 +157,13 @@ model PlanState {
   reason        String   @default("")
   feasible      Boolean  @default(true)
   shortfallKwh  Float    @default(0)
+  // Last on/off state successfully pushed to Home Assistant; null = never pushed.
+  haSyncOn      Boolean?
+  haSyncAt      DateTime?
+  haSyncError   String?
+  // Latest known charger-connected state (see refreshChargerConnected()) — used to
+  // force the current hour "home" even when the schedule says away.
+  chargerConnected Boolean @default(false)
 }
 
 model ChargeLog {

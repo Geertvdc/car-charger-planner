@@ -47,17 +47,19 @@ export default function SimulationBar({
   }
 
   return (
-    <div className="panel-soft p-1.5">
+    <div
+      className={`panel-soft p-1 transition-opacity ${active ? "" : "opacity-55 hover:opacity-90"}`}
+    >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-lg bg-transparent px-2.5 py-2 text-left text-xs font-semibold text-[var(--color-text)]"
+        className="flex w-full items-center gap-1.5 rounded-lg bg-transparent px-2 py-1 text-left text-[11px] font-semibold text-[var(--color-text)]"
       >
         <span
-          className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+          className="inline-block h-1 w-1 shrink-0 rounded-full"
           style={{
             background: active ? "var(--color-accent)" : "var(--color-home)",
-            animation: "pulseDot 2s ease-in-out infinite",
+            animation: active ? "pulseDot 2s ease-in-out infinite" : undefined,
           }}
         />
         Simulation{" "}
@@ -66,13 +68,13 @@ export default function SimulationBar({
             {effective?.toFormat("ccc dd LLL HH:mm")}
           </span>
         ) : (
-          <span className="font-medium text-[var(--color-muted)]">off · live clock</span>
+          <span className="font-medium text-[var(--color-muted)]">off</span>
         )}
-        <span className="ml-auto text-[var(--color-muted)]">{open ? "▲ hide" : "▼ show"}</span>
+        <span className="ml-auto text-[10px] text-[var(--color-muted)]">{open ? "▲" : "▼"}</span>
       </button>
 
       {open && (
-        <div className="flex flex-wrap items-center gap-3.5 px-2.5 pb-2 pt-1">
+        <div className="flex flex-wrap items-center gap-3.5 px-2 pb-2 pt-1">
           <div className="flex items-center gap-1.5">
             {[
               { label: "−1h", v: -60 },
@@ -122,9 +124,10 @@ export default function SimulationBar({
 
           {active && (
             <p className="w-full text-xs text-[var(--color-muted)]">
-              The planner, timeline and Home Assistant endpoints all treat the time above as
-              &ldquo;now&rdquo;. Click <strong>Back to live</strong> to return to the real clock.
-              Only today/tomorrow have price &amp; solar data.
+              The planner and timeline treat the time above as &ldquo;now&rdquo; — but pushes to
+              your real charger are disabled while simulating. Click{" "}
+              <strong>Back to live</strong> to return to the real clock and resume control. Only
+              today/tomorrow have price &amp; solar data.
             </p>
           )}
         </div>

@@ -72,14 +72,8 @@ export default async function SchedulePage() {
                     <span>
                       {w.startTime}–{w.endTime}
                     </span>
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-xs ${
-                        w.status === "MAYBE"
-                          ? "bg-[rgba(94,200,255,0.12)] text-[var(--color-muted)]"
-                          : "bg-[rgba(94,200,255,0.28)] text-[var(--color-text)]"
-                      }`}
-                    >
-                      {w.status === "MAYBE" ? "maybe home" : "home"}
+                    <span className="rounded bg-[rgba(94,200,255,0.28)] px-1.5 py-0.5 text-xs text-[var(--color-text)]">
+                      home
                     </span>
                     <form action={deleteWindow} className="ml-auto">
                       <input type="hidden" name="id" value={w.id} />
@@ -100,13 +94,6 @@ export default async function SchedulePage() {
                 <label className="block">
                   <span className="label">Until</span>
                   <input className="input w-24" type="time" name="endTime" defaultValue="23:59" />
-                </label>
-                <label className="block">
-                  <span className="label">Status</span>
-                  <select className="select w-28" name="status" defaultValue="DEFINITE">
-                    <option value="DEFINITE">Home</option>
-                    <option value="MAYBE">Maybe home</option>
-                  </select>
                 </label>
                 <button className="btn" type="submit">
                   + Add

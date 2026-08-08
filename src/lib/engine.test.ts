@@ -8,7 +8,7 @@ function hour(
   iso: string,
   price: number,
   solarWh = 0,
-  availability: AvailStatus = "DEFINITE"
+  availability: AvailStatus = "HOME"
 ): EngineHour {
   return { hourStart: H(iso), allInPrice: price, solarWh, availability };
 }
@@ -71,7 +71,7 @@ describe("computePlan", () => {
   it("flags infeasible when home hours cannot meet the target", () => {
     // Only one 10 kWh hour available but 18 kWh needed.
     const hours: EngineHour[] = [
-      hour("2026-01-01T20:00:00Z", 0.2, 0, "DEFINITE"),
+      hour("2026-01-01T20:00:00Z", 0.2, 0, "HOME"),
       hour("2026-01-01T21:00:00Z", 0.2, 0, "AWAY"),
     ];
     const r = computePlan({
@@ -83,34 +83,29 @@ describe("computePlan", () => {
     expect(r.shortfallKwh).toBeCloseTo(8, 5);
   });
 
-  it("only uses MAYBE hours to cover a shortfall, never over DEFINITE", () => {
+  it("never charges during away hours", () => {
     const hours: EngineHour[] = [
-      // Cheap MAYBE vs pricier DEFINITE. Need 18 kWh; DEFINITE gives 20 kWh capacity.
-      hour("2026-01-01T20:00:00Z", 0.05, 0, "MAYBE"),
-      hour("2026-01-01T21:00:00Z", 0.5, 0, "DEFINITE"),
-      hour("2026-01-01T22:00:00Z", 0.5, 0, "DEFINITE"),
+      hour("2026-01-01T20:00:00Z", 0.05, 0, "AWAY"), // cheap but away
+      hour("2026-01-01T21:00:00Z", 0.5, 0, "HOME"),
+      hour("2026-01-01T22:00:00Z", 0.5, 0, "HOME"),
     ];
     const r = computePlan({
       ...base,
       horizonEnd: H("2026-01-01T23:00:00Z"),
       hours,
     });
-    const onStatuses = r.slots
-      .filter((s) => s.on)
-      .map((s) => hours.find((h) => h.hourStart.getTime() === s.hourStart.getTime())!.availability);
-    // Both DEFINITE hours used; MAYBE ignored because DEFINITE alone suffices.
-    expect(onStatuses.filter((s) => s === "DEFINITE").length).toBe(2);
-    expect(onStatuses).not.toContain("MAYBE");
+    const on = r.slots.filter((s) => s.on).map((s) => s.hourStart.toISOString());
+    expect(on).not.toContain("2026-01-01T20:00:00.000Z");
     expect(r.feasible).toBe(true);
   });
 
   it("uses a cheap window the day before ahead of an expensive night", () => {
     // Deadline tomorrow 07:00. A cheap home afternoon today vs an expensive home night.
     const hours: EngineHour[] = [
-      hour("2026-01-01T14:00:00Z", 0.1, 0, "DEFINITE"), // cheap afternoon
-      hour("2026-01-01T15:00:00Z", 0.1, 0, "DEFINITE"),
-      hour("2026-01-02T02:00:00Z", 0.6, 0, "DEFINITE"), // expensive night
-      hour("2026-01-02T03:00:00Z", 0.6, 0, "DEFINITE"),
+      hour("2026-01-01T14:00:00Z", 0.1, 0, "HOME"), // cheap afternoon
+      hour("2026-01-01T15:00:00Z", 0.1, 0, "HOME"),
+      hour("2026-01-02T02:00:00Z", 0.6, 0, "HOME"), // expensive night
+      hour("2026-01-02T03:00:00Z", 0.6, 0, "HOME"),
     ];
     const r = computeMultiPlan({
       now: H("2026-01-01T13:00:00Z"),
@@ -132,9 +127,9 @@ describe("computePlan", () => {
 
   it("satisfies two deadlines, banking cheap energy for later", () => {
     const hours: EngineHour[] = [
-      hour("2026-01-01T14:00:00Z", 0.05, 0, "DEFINITE"), // very cheap
-      hour("2026-01-01T22:00:00Z", 0.4, 0, "DEFINITE"),
-      hour("2026-01-02T14:00:00Z", 0.05, 0, "DEFINITE"), // very cheap next day
+      hour("2026-01-01T14:00:00Z", 0.05, 0, "HOME"), // very cheap
+      hour("2026-01-01T22:00:00Z", 0.4, 0, "HOME"),
+      hour("2026-01-02T14:00:00Z", 0.05, 0, "HOME"), // very cheap next day
     ];
     const r = computeMultiPlan({
       now: H("2026-01-01T13:00:00Z"),
@@ -160,8 +155,8 @@ describe("computePlan", () => {
   it("charges opportunistically below the cheap-price threshold even without target need", () => {
     // Already at target (60%), but one hour is dirt cheap and threshold is set.
     const hours: EngineHour[] = [
-      hour("2026-01-01T20:00:00Z", 0.02, 0, "DEFINITE"), // below threshold
-      hour("2026-01-01T21:00:00Z", 0.3, 0, "DEFINITE"), // above threshold
+      hour("2026-01-01T20:00:00Z", 0.02, 0, "HOME"), // below threshold
+      hour("2026-01-01T21:00:00Z", 0.3, 0, "HOME"), // above threshold
     ];
     const r = computePlan({
       ...base,
@@ -183,8 +178,8 @@ describe("computePlan", () => {
   it("caps opportunistic cheap charging at maxSoc", () => {
     // 60% -> 90% cap = 18 kWh headroom; two 10 kWh cheap hours available, only 18 kWh used.
     const hours: EngineHour[] = [
-      hour("2026-01-01T20:00:00Z", 0.01, 0, "DEFINITE"),
-      hour("2026-01-01T21:00:00Z", 0.01, 0, "DEFINITE"),
+      hour("2026-01-01T20:00:00Z", 0.01, 0, "HOME"),
+      hour("2026-01-01T21:00:00Z", 0.01, 0, "HOME"),
     ];
     const r = computePlan({
       ...base,
@@ -200,7 +195,7 @@ describe("computePlan", () => {
   });
 
   it("does not mark a target-required hour as cheap even if it also clears the threshold", () => {
-    const hours: EngineHour[] = [hour("2026-01-01T20:00:00Z", 0.02, 0, "DEFINITE")];
+    const hours: EngineHour[] = [hour("2026-01-01T20:00:00Z", 0.02, 0, "HOME")];
     const r = computePlan({
       ...base,
       currentSoc: 50,

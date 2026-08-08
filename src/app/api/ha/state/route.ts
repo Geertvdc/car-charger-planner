@@ -5,6 +5,11 @@ import { effectiveNow } from "@/lib/now";
 
 export const dynamic = "force-dynamic";
 
+// Legacy/manual-fallback route: the app now pushes charger on/off to HA directly
+// (see src/lib/ha-control.ts, invoked from src/lib/plan.ts). This GET endpoint is no
+// longer required for normal operation — kept for debugging (inspect the computed
+// decision without touching HA) and as an escape hatch for a poll-based HA automation
+// if you'd rather not grant this app write access to your HA instance.
 // Richer JSON for HA REST sensor + attributes.
 export async function GET(req: Request) {
   if (!(await checkHaAuth(req))) {

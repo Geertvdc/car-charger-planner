@@ -1,6 +1,8 @@
 import { prisma } from "./db";
 import { resolveDay, statusForHour, WindowDef } from "./availability";
 import { computeMultiPlan, Deadline, EngineHour } from "./engine";
+import { logDecisionTransition } from "./ha";
+import { syncChargerState } from "./ha-control";
 import { resolveNow } from "./now";
 import {
   addDaysISO,
@@ -35,6 +37,7 @@ export async function recomputePlan(nowOverride?: Date) {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const car = await prisma.carConfig.findUniqueOrThrow({ where: { id: 1 } });
   const latestSoc = await prisma.carState.findFirst({ orderBy: { at: "desc" } });
+  const priorPlan = await prisma.planState.findUnique({ where: { id: 1 } });
   const tz = settings.timezone;
   const now = resolveNow(settings.simulatedNow, nowOverride);
   const nowHour = floorToHour(now);
@@ -69,6 +72,8 @@ export async function recomputePlan(nowOverride?: Date) {
         },
       }),
     ]);
+    await syncChargerState(false).catch(() => undefined);
+    await logDecisionTransition(false).catch(() => undefined);
     return;
   }
 
@@ -103,6 +108,13 @@ export async function recomputePlan(nowOverride?: Date) {
       solarWh: solarMap.get(t.getTime()) ?? 0,
       availability: statusForHour(t, dateISO, day.windows, tz),
     });
+  }
+
+  // A physically connected car means you're clearly home right now, regardless of
+  // what the schedule says — force the current hour available even if it's marked away.
+  if (priorPlan?.chargerConnected) {
+    const nowSlot = hours.find((h) => h.hourStart.getTime() === nowHour.getTime());
+    if (nowSlot) nowSlot.availability = "HOME";
   }
 
   const engineDeadlines: Deadline[] = deadlines.map((d) => ({
@@ -161,6 +173,9 @@ export async function recomputePlan(nowOverride?: Date) {
       },
     }),
   ]);
+
+  await syncChargerState(result.chargingNow).catch(() => undefined);
+  await logDecisionTransition(result.chargingNow).catch(() => undefined);
 
   return result;
 }

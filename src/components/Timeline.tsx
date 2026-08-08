@@ -22,11 +22,10 @@ const SVG_H = LABEL_Y + 6;
 const socY = (soc: number) => PRICE_BOTTOM - (Math.max(0, Math.min(100, soc)) / 100) * PRICE_H;
 const socFromY = (y: number) => Math.round((((PRICE_BOTTOM - y) / PRICE_H) * 100) / 5) * 5;
 
-// Cycle a home/away state on tap: away → home → maybe → away.
+// Cycle a home/away state on tap: away → home → away.
 const NEXT_STATUS: Record<AvailStatus, AvailStatus> = {
-  AWAY: "DEFINITE",
-  DEFINITE: "MAYBE",
-  MAYBE: "AWAY",
+  AWAY: "HOME",
+  HOME: "AWAY",
 };
 
 function priceRatio(price: number, maxPrice: number): number {
@@ -40,9 +39,7 @@ function barFill(ratio: number): string {
 }
 
 function availFill(status: string): string {
-  if (status === "DEFINITE") return "rgba(94,200,255,0.32)";
-  if (status === "MAYBE") return "rgba(94,200,255,0.12)";
-  return "transparent";
+  return status === "HOME" ? "rgba(94,200,255,0.32)" : "transparent";
 }
 
 export default function Timeline({ data }: { data: TimelineData }) {
@@ -517,7 +514,7 @@ function DayChart({
       </svg>
       {editable && (
         <div className="mt-1.5 text-[10px] leading-tight text-[var(--color-muted)]">
-          Drag ● to set this day&apos;s target · tap the home bar to toggle home/maybe/away
+          Drag ● to set this day&apos;s target · tap the home bar to toggle home/away
         </div>
       )}
     </div>

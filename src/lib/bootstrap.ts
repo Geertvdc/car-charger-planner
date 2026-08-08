@@ -23,7 +23,7 @@ export async function ensureSingletons(): Promise<void> {
           dayOfWeek,
           deadlineTime: "07:00",
           targetSoc: 80,
-          windows: { create: [{ startTime: "00:00", endTime: "23:59", status: "DEFINITE" }] },
+          windows: { create: [{ startTime: "00:00", endTime: "23:59" }] },
         },
       });
     }

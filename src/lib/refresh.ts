@@ -1,12 +1,16 @@
 import { prisma } from "./db";
 import { fetchEnergyZeroDay } from "./energyzero";
 import { fetchForecastSolarString } from "./forecastsolar";
+import { getEntityState } from "./ha-client";
 import { allInPrice } from "./pricing";
 import { addDaysISO, todayISO } from "./time";
 
 export interface RefreshResult {
   prices: { ok: boolean; count: number; error?: string };
   solar: { ok: boolean; count: number; error?: string };
+  power: { ok: boolean; count: number; error?: string };
+  carSoc: { ok: boolean; count: number; error?: string };
+  chargerConnected: { ok: boolean; count: number; error?: string };
 }
 
 export async function refreshPrices(): Promise<RefreshResult["prices"]> {
@@ -72,10 +76,95 @@ export async function refreshSolar(): Promise<RefreshResult["solar"]> {
   }
 }
 
+/** Read the configured HomeWizard power sensor via HA and log one reading. Display only. */
+export async function refreshPower(): Promise<RefreshResult["power"]> {
+  const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
+  const entityId = settings.haPowerSensorEntityId?.trim();
+  if (!entityId) return { ok: true, count: 0 };
+  try {
+    const entity = await getEntityState(entityId);
+    if (!entity) return { ok: true, count: 0 };
+    const watts = parseFloat(entity.state);
+    if (!Number.isFinite(watts)) {
+      return { ok: false, count: 0, error: `non-numeric state from HA: ${entity.state}` };
+    }
+    await prisma.powerReading.create({ data: { watts } });
+    return { ok: true, count: 1 };
+  } catch (e) {
+    return { ok: false, count: 0, error: (e as Error).message };
+  }
+}
+
+/**
+ * Read the configured car SoC sensor via HA (e.g. the EU Data Act portal integration)
+ * and record a new CarState row — but only when the entity's own last_changed has
+ * advanced since the last ha_car reading, so a repeated stale poll never overwrites a
+ * more recent manual entry (recomputePlan() already picks whichever CarState row is
+ * newest by `at`, regardless of source).
+ */
+export async function refreshCarSoc(): Promise<RefreshResult["carSoc"]> {
+  const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
+  const entityId = settings.haCarSocEntityId?.trim();
+  if (!entityId) return { ok: true, count: 0 };
+  try {
+    const entity = await getEntityState(entityId);
+    if (!entity) return { ok: true, count: 0 };
+    const soc = Math.round(parseFloat(entity.state));
+    if (!Number.isFinite(soc) || soc < 0 || soc > 100) {
+      return { ok: false, count: 0, error: `implausible SoC from HA: ${entity.state}` };
+    }
+    const rawUpdatedAt = new Date(entity.last_changed);
+    if (isNaN(rawUpdatedAt.getTime())) {
+      return { ok: false, count: 0, error: `invalid last_changed from HA: ${entity.last_changed}` };
+    }
+    const lastHa = await prisma.carState.findFirst({
+      where: { source: "ha_car" },
+      orderBy: { at: "desc" },
+    });
+    if (lastHa?.rawUpdatedAt && lastHa.rawUpdatedAt.getTime() >= rawUpdatedAt.getTime()) {
+      return { ok: true, count: 0 };
+    }
+    await prisma.carState.create({ data: { soc, source: "ha_car", rawUpdatedAt } });
+    return { ok: true, count: 1 };
+  } catch (e) {
+    return { ok: false, count: 0, error: (e as Error).message };
+  }
+}
+
+/**
+ * Read the configured "cable connected" binary_sensor via HA and store the latest
+ * known state on PlanState. recomputePlan() reads that stored value (not a live HA
+ * call) to force the current hour "home" when a car is physically connected — see
+ * plan.ts. Called from refreshAll() (30 min + manual refresh) and, more frequently,
+ * from the scheduler's background recompute tick (src/lib/scheduler.ts) so the
+ * override reacts within ~10 min without adding a live HA round-trip to every
+ * interactive recomputePlan() call (settings saves, timeline edits, etc.).
+ */
+export async function refreshChargerConnected(): Promise<RefreshResult["chargerConnected"]> {
+  const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
+  const entityId = settings.haChargerConnectedEntityId?.trim();
+  if (!entityId) return { ok: true, count: 0 };
+  try {
+    const entity = await getEntityState(entityId);
+    if (!entity) return { ok: true, count: 0 };
+    const connected = entity.state === "on";
+    await prisma.planState.update({ where: { id: 1 }, data: { chargerConnected: connected } });
+    return { ok: true, count: 1 };
+  } catch (e) {
+    return { ok: false, count: 0, error: (e as Error).message };
+  }
+}
+
 export async function refreshAll(): Promise<RefreshResult> {
-  const [prices, solar] = await Promise.all([refreshPrices(), refreshSolar()]);
+  const [prices, solar, power, carSoc, chargerConnected] = await Promise.all([
+    refreshPrices(),
+    refreshSolar(),
+    refreshPower(),
+    refreshCarSoc(),
+    refreshChargerConnected(),
+  ]);
   // Recompute the plan against the freshest data.
   const { recomputePlan } = await import("./plan");
   await recomputePlan().catch(() => undefined);
-  return { prices, solar };
+  return { prices, solar, power, carSoc, chargerConnected };
 }

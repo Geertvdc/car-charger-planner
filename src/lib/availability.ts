@@ -2,12 +2,11 @@ import { DateTime } from "luxon";
 import { prisma } from "./db";
 import { localTimeToUTC } from "./time";
 
-export type AvailStatus = "DEFINITE" | "MAYBE" | "AWAY";
+export type AvailStatus = "HOME" | "AWAY";
 
 export interface WindowDef {
   startTime: string; // HH:MM
   endTime: string; // HH:MM
-  status: "DEFINITE" | "MAYBE";
 }
 
 export interface DayConfig {
@@ -41,7 +40,7 @@ export async function resolveDay(dateISO: string): Promise<DayConfig> {
   //  - override marked "away" => no windows at all
   //  - override with its own windows => those replace the template
   //  - override that only tweaks target/deadline => keep the template windows
-  let source: { startTime: string; endTime: string; status: string }[];
+  let source: { startTime: string; endTime: string }[];
   if (override?.away) source = [];
   else if (override && override.windows.length > 0) source = override.windows;
   else source = weekly?.windows ?? [];
@@ -49,28 +48,23 @@ export async function resolveDay(dateISO: string): Promise<DayConfig> {
   const windows: WindowDef[] = source.map((w) => ({
     startTime: w.startTime,
     endTime: w.endTime,
-    status: w.status === "MAYBE" ? "MAYBE" : "DEFINITE",
   }));
 
   return { dateISO, windows, deadlineTime, targetSoc, isOverride: !!override };
 }
 
-/** Status for an hour bucket, given a day's windows. Priority DEFINITE > MAYBE > AWAY. */
+/** Status for an hour bucket: home if it falls in any window, otherwise away. */
 export function statusForHour(
   hourStart: Date,
   dateISO: string,
   windows: WindowDef[],
   tz: string
 ): AvailStatus {
-  let best: AvailStatus = "AWAY";
   for (const w of windows) {
     const start = localTimeToUTC(dateISO, w.startTime, tz);
     // "23:59" means through end-of-day; treat inclusive to the next hour boundary.
     const end = localTimeToUTC(dateISO, w.endTime, tz);
-    if (hourStart >= start && hourStart < end) {
-      if (w.status === "DEFINITE") return "DEFINITE";
-      best = "MAYBE";
-    }
+    if (hourStart >= start && hourStart < end) return "HOME";
   }
-  return best;
+  return "AWAY";
 }

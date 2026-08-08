@@ -65,6 +65,15 @@ export async function saveSettings(formData: FormData) {
       cheapPriceThresholdPerKwh: numOrNull(formData.get("cheapPriceThresholdPerKwh")),
       historyDays: Math.max(0, Math.round(num(formData.get("historyDays"), 3))),
       haToken: str(formData.get("haToken")),
+      haBaseUrl: str(formData.get("haBaseUrl")).trim().replace(/\/+$/, ""),
+      haAccessToken: str(formData.get("haAccessToken")),
+      haChargerSwitchEntityId: str(formData.get("haChargerSwitchEntityId")).trim(),
+      haChargerStatusEntityId: str(formData.get("haChargerStatusEntityId")).trim(),
+      haChargerConnectedEntityId: str(formData.get("haChargerConnectedEntityId")).trim(),
+      haChargerOnService: str(formData.get("haChargerOnService"), "switch.turn_on").trim(),
+      haChargerOffService: str(formData.get("haChargerOffService"), "switch.turn_off").trim(),
+      haPowerSensorEntityId: str(formData.get("haPowerSensorEntityId")).trim(),
+      haCarSocEntityId: str(formData.get("haCarSocEntityId")).trim(),
     },
   });
   await recomputePlan().catch(() => undefined);
@@ -134,7 +143,6 @@ export async function addWeeklyWindow(formData: FormData) {
       weeklyDayId: day.id,
       startTime: str(formData.get("startTime"), "00:00"),
       endTime: str(formData.get("endTime"), "23:59"),
-      status: str(formData.get("status"), "DEFINITE") === "MAYBE" ? "MAYBE" : "DEFINITE",
     },
   });
   await recomputePlan().catch(() => undefined);
@@ -171,7 +179,6 @@ export async function addOverrideWindow(formData: FormData) {
       dayOverrideId: ov.id,
       startTime: str(formData.get("startTime"), "00:00"),
       endTime: str(formData.get("endTime"), "23:59"),
-      status: str(formData.get("status"), "DEFINITE") === "MAYBE" ? "MAYBE" : "DEFINITE",
     },
   });
   await recomputePlan().catch(() => undefined);
