@@ -183,14 +183,49 @@ export async function refreshCarSoc(): Promise<RefreshResult["carSoc"]> {
   }
 }
 
+/** States meaning a cable is plugged in, beyond a plain binary_sensor "on". */
+const CONNECTED_STATES = new Set([
+  "on",
+  "true",
+  "connected",
+  "charging",
+  // Zaptec's charger_mode enum: options are unknown | disconnected |
+  // connected_requesting | connected_charging | connected_finished.
+  "connected_requesting",
+  "connected_charging",
+  "connected_finished",
+]);
+
+const DISCONNECTED_STATES = new Set(["off", "false", "disconnected", "not_connected"]);
+
 /**
- * Read the configured "cable connected" binary_sensor via HA and store the latest
- * known state on PlanState. recomputePlan() reads that stored value (not a live HA
- * call) to force the current hour "home" when a car is physically connected — see
- * plan.ts. Called from refreshAll() (30 min + manual refresh) and, more frequently,
- * from the scheduler's background recompute tick (src/lib/scheduler.ts) so the
- * override reacts within ~10 min without adding a live HA round-trip to every
- * interactive recomputePlan() call (settings saves, timeline edits, etc.).
+ * Interpret a charger entity's state as "is a car plugged in".
+ *
+ * Returns null when the entity can't answer — `unknown`/`unavailable`, or a value we
+ * don't recognise. Callers treat null as "no reading" and leave the stored value
+ * alone, so a momentary HA blip can't drop the override and cancel a live session.
+ *
+ * Accepting more than "on"/"off" is what lets a charger-mode *sensor* be used here.
+ * A plain binary_sensor is often the wrong entity: on the Zaptec integration the
+ * obvious-looking `binary_sensor.<charger>_charger` is device_class `connectivity`
+ * (the charger is online), which reads "on" permanently and would force every hour
+ * to count as home.
+ */
+export function interpretConnectedState(state: string | undefined | null): boolean | null {
+  const value = (state ?? "").trim().toLowerCase();
+  if (CONNECTED_STATES.has(value)) return true;
+  if (DISCONNECTED_STATES.has(value)) return false;
+  return null;
+}
+
+/**
+ * Read the configured charger-connected entity via HA and store the latest known
+ * state on PlanState. recomputePlan() reads that stored value (not a live HA call)
+ * to treat away hours as home while a car is physically connected — see plan.ts.
+ * Called from refreshAll() (30 min + manual refresh) and, more frequently, from the
+ * scheduler's background recompute tick (src/lib/scheduler.ts) so the override reacts
+ * within ~10 min without adding a live HA round-trip to every interactive
+ * recomputePlan() call (settings saves, timeline edits, etc.).
  */
 export async function refreshChargerConnected(): Promise<RefreshResult["chargerConnected"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
@@ -199,7 +234,8 @@ export async function refreshChargerConnected(): Promise<RefreshResult["chargerC
   try {
     const entity = await getEntityState(entityId);
     if (!entity) return { ok: true, count: 0 };
-    const connected = entity.state === "on";
+    const connected = interpretConnectedState(entity.state);
+    if (connected === null) return { ok: true, count: 0 }; // unreadable — keep the last value
     await prisma.planState.update({ where: { id: 1 }, data: { chargerConnected: connected } });
     return { ok: true, count: 1 };
   } catch (e) {

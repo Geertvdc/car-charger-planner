@@ -276,12 +276,25 @@ and it stays authoritative until the car itself reports something newer.
 
 ### Charger-connected override (optional)
 
-Set **Charger connected entity ID** to a `binary_sensor` that reports whether a car is
-physically plugged into the charger (e.g. `binary_sensor.zaptec_go_2_charger`). When it
-reads `on`, the planner treats the current hour as home even if your weekly schedule or
-an override says away — a plugged-in car is unambiguous evidence you're there. This is
-purely a runtime override for the scheduling decision; it doesn't modify your saved
-schedule. Checked in the background roughly every 10 minutes (and on every manual
+Set **Charger connected entity ID** to an entity reporting whether a car is physically
+plugged in. Either shape works: a `binary_sensor` (`on`/`off`), or a charger-mode enum
+sensor such as Zaptec's `sensor.<charger>_charger_mode` (`disconnected` /
+`connected_requesting` / `connected_charging` / `connected_finished`).
+
+While it reads connected, the planner treats **every away hour from now until your
+schedule next says home** as home, even if a weekly rule or an override says away — a
+plugged-in car is unambiguous evidence you're there. It opens the whole run rather than
+just the current hour because charging has to be planned across a *stretch* of eligible
+hours: given one hour at a time the engine can't compare an away evening's prices and
+pick the cheapest, or see that a deadline is reachable at all. A later away block (a trip
+next week) is untouched. This is purely a runtime override for the scheduling decision;
+it doesn't modify your saved schedule.
+
+Do **not** point this at `binary_sensor.<charger>_charger` on the Zaptec integration: it
+is `device_class: connectivity`, meaning the charger is online, and reads `on`
+permanently — which would cancel your away schedule outright. An `unknown` or
+`unavailable` reading leaves the last known value in place, so a momentary Home Assistant
+blip can't drop the override mid-session. Checked in the background roughly every 10 minutes (and on every manual
 **Refresh data & plan**), not on every interactive save, so it never adds a live HA
 round-trip to actions like dragging the target slider.
 

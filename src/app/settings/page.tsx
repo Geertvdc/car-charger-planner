@@ -161,10 +161,14 @@ export default async function SettingsPage() {
             />
           </div>
           <p className="mb-2 text-xs text-[var(--color-muted)]">
-            When the connected entity reads <code>on</code> (e.g. a Zaptec{" "}
-            <code>binary_sensor..._charger</code>), the current hour is treated as home even if
-            your schedule says away — a plugged-in car means you&apos;re clearly there. Checked in
-            the background every ~10 min, not on every save.
+            While the connected entity reports a cable is plugged in, every away hour from now
+            until your schedule next says home is treated as home, so the car can charge — a
+            plugged-in car means you&apos;re clearly there. Accepts a{" "}
+            <code>binary_sensor</code> (<code>on</code>/<code>off</code>) or a charger-mode enum
+            sensor such as Zaptec&apos;s <code>sensor..._charger_mode</code>. Avoid{" "}
+            <code>binary_sensor..._charger</code>: it is <code>device_class: connectivity</code>{" "}
+            (the charger is online) and reads <code>on</code> permanently, which would cancel
+            your away schedule entirely. Checked in the background every ~10 min.
           </p>
           <p className="mb-2 mt-4 text-xs text-[var(--color-muted)]">
             HA service to call for each action, as <code>domain.service</code>. Defaults match a

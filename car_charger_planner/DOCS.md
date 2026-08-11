@@ -30,8 +30,12 @@ Open the panel and work through these once:
 Optional entity hookups, all read-only:
 
 - **Charger status** — charging power or state, shown on the dashboard.
-- **Charger connected** — a cable-connected `binary_sensor`. While it reads `on`, the
-  current hour counts as home even if the schedule says away.
+- **Charger connected** — an entity reporting whether a cable is plugged in: a
+  `binary_sensor` (`on`/`off`) or a charger-mode enum sensor such as Zaptec's
+  `sensor.<charger>_charger_mode`. While it reads connected, every away hour from now
+  until the schedule next says home counts as home, so the car can charge. Don't use
+  `binary_sensor.<charger>_charger` — that one is `device_class: connectivity` (charger
+  online) and reads `on` permanently.
 - **Car SoC** — a battery-percentage sensor, so the current charge is read automatically
   instead of entered by hand. Expect 15–60 minutes of latency from most car integrations.
 - **Power meter** — a P1/HomeWizard power sensor, displayed on the dashboard.

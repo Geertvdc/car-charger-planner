@@ -35,6 +35,7 @@ vi.mock("./energyzero", () => ({
 
 import {
   __resetPriceBackfillCache,
+  interpretConnectedState,
   refreshCarSoc,
   refreshChargerConnected,
   refreshPower,
@@ -385,5 +386,76 @@ describe("refreshPrices backfill", () => {
     fetchEnergyZeroDay.mockClear().mockImplementation((d: string) => onePoint(d));
     await refreshPrices();
     expect(fetchedDates()).toContain("2026-08-08");
+  });
+});
+
+describe("interpretConnectedState", () => {
+  it("reads a plain binary_sensor", () => {
+    expect(interpretConnectedState("on")).toBe(true);
+    expect(interpretConnectedState("off")).toBe(false);
+  });
+
+  it("reads the Zaptec charger_mode enum", () => {
+    // Options published by the entity:
+    // unknown | disconnected | connected_requesting | connected_charging | connected_finished
+    expect(interpretConnectedState("disconnected")).toBe(false);
+    expect(interpretConnectedState("connected_requesting")).toBe(true);
+    expect(interpretConnectedState("connected_charging")).toBe(true);
+    expect(interpretConnectedState("connected_finished")).toBe(true);
+  });
+
+  it("is case- and whitespace-insensitive", () => {
+    expect(interpretConnectedState(" Connected_Charging ")).toBe(true);
+    expect(interpretConnectedState("DISCONNECTED")).toBe(false);
+  });
+
+  it("returns null for states that cannot answer, so the last value is kept", () => {
+    expect(interpretConnectedState("unknown")).toBeNull();
+    expect(interpretConnectedState("unavailable")).toBeNull();
+    expect(interpretConnectedState("")).toBeNull();
+    expect(interpretConnectedState(undefined)).toBeNull();
+    expect(interpretConnectedState("something_new")).toBeNull();
+  });
+});
+
+describe("refreshChargerConnected", () => {
+  beforeEach(() => {
+    settingsFindUniqueOrThrow.mockReset().mockResolvedValue({
+      haChargerConnectedEntityId: "sensor.zaptec_go_2_charger_mode",
+    });
+    planStateUpdate.mockReset().mockResolvedValue({});
+    getEntityState.mockReset();
+  });
+
+  it("stores connected=true while the car is plugged in", async () => {
+    getEntityState.mockResolvedValue({ state: "connected_charging", attributes: {}, last_changed: "" });
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { chargerConnected: true },
+    });
+  });
+
+  it("stores connected=false once the cable is out", async () => {
+    getEntityState.mockResolvedValue({ state: "disconnected", attributes: {}, last_changed: "" });
+    await refreshChargerConnected();
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { chargerConnected: false },
+    });
+  });
+
+  it("leaves the stored value alone when the entity goes unavailable", async () => {
+    getEntityState.mockResolvedValue({ state: "unavailable", attributes: {}, last_changed: "" });
+    const result = await refreshChargerConnected();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(planStateUpdate).not.toHaveBeenCalled();
+  });
+
+  it("no-ops when no entity is configured", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haChargerConnectedEntityId: "" });
+    expect(await refreshChargerConnected()).toEqual({ ok: true, count: 0 });
+    expect(getEntityState).not.toHaveBeenCalled();
   });
 });

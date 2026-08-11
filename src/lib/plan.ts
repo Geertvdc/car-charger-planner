@@ -33,6 +33,27 @@ async function upcomingDeadlines(now: Date, tz: string) {
   return out.sort((a, b) => a.instant.getTime() - b.instant.getTime());
 }
 
+/**
+ * A physically connected car means you're clearly home, whatever the schedule says.
+ *
+ * Opens up the entire away stretch the car is currently sitting in — from the current
+ * hour until the schedule next says home — rather than only the current hour. Charging
+ * needs a *run* of eligible hours to be planned across: handed one hour at a time the
+ * engine can't compare an away evening's prices and pick the cheapest, nor see that a
+ * deadline is reachable at all.
+ *
+ * Scoped to the current run, so a later away block (a trip next week) stays away. And
+ * it's re-derived on every recompute, so unplugging hands control back to the schedule
+ * within a scheduler tick.
+ */
+export function applyChargerConnectedOverride(hours: EngineHour[], nowHour: Date): void {
+  for (const hour of hours) {
+    if (hour.hourStart.getTime() < nowHour.getTime()) continue;
+    if (hour.availability === "HOME") break; // schedule agrees from here on
+    hour.availability = "HOME";
+  }
+}
+
 export async function recomputePlan(nowOverride?: Date) {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const car = await prisma.carConfig.findUniqueOrThrow({ where: { id: 1 } });
@@ -110,11 +131,8 @@ export async function recomputePlan(nowOverride?: Date) {
     });
   }
 
-  // A physically connected car means you're clearly home right now, regardless of
-  // what the schedule says — force the current hour available even if it's marked away.
   if (priorPlan?.chargerConnected) {
-    const nowSlot = hours.find((h) => h.hourStart.getTime() === nowHour.getTime());
-    if (nowSlot) nowSlot.availability = "HOME";
+    applyChargerConnectedOverride(hours, nowHour);
   }
 
   const engineDeadlines: Deadline[] = deadlines.map((d) => ({
