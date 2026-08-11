@@ -1,0 +1,34 @@
+name: Car Charger Planner
+version: "0.1.0"
+slug: car_charger_planner
+description: >-
+  Charges your EV on the cheapest dynamic-price and solar hours while meeting a
+  morning readiness target, respecting a weekly home/away schedule.
+url: https://github.com/Geertvdc/car-charger-planner
+image: ghcr.io/geertvdc/car-charger-planner-{arch}
+arch:
+  - amd64
+  - aarch64
+
+# The image ships its own entrypoint rather than the s6 base image's init.
+init: false
+startup: application
+boot: auto
+
+# Served entirely through Ingress: the panel lives in the Home Assistant sidebar and
+# inherits HA's authentication, so no port is published on the host. `ingress_port`
+# matches the PORT the container's proxy listens on.
+ingress: true
+ingress_port: 3000
+panel_icon: mdi:ev-station
+panel_title: Charger Planner
+panel_admin: true
+
+# Grants the Supervisor-proxied Home Assistant API, which is how the add-on reads the
+# charger/car/power entities and calls services without a long-lived access token.
+homeassistant_api: true
+
+# All configuration lives in the add-on's own UI (and its database on /data), so there
+# is nothing to set here.
+options: {}
+schema: {}

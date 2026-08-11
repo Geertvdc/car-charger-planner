@@ -3,6 +3,7 @@
 import { DateTime } from "luxon";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useAppUrl } from "./BasePathProvider";
 
 export default function SimulationBar({
   simulatedNowISO,
@@ -12,6 +13,7 @@ export default function SimulationBar({
   tz: string;
 }) {
   const router = useRouter();
+  const appUrl = useAppUrl();
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
 
@@ -35,7 +37,7 @@ export default function SimulationBar({
   async function call(body: Record<string, unknown>) {
     setBusy(true);
     try {
-      await fetch("/api/simulation", {
+      await fetch(appUrl("/api/simulation"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

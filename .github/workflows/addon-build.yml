@@ -1,0 +1,88 @@
+name: Build add-on images
+
+# Publishes the images the Home Assistant Supervisor pulls. `car_charger_planner/config.yaml`
+# points at ghcr.io/geertvdc/car-charger-planner-{arch} and the Supervisor substitutes the
+# architecture, so each architecture is a separate repository tagged with the add-on version.
+# Releasing = bumping `version` in that file.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "prisma/**"
+      - "public/**"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.mjs"
+      - "tsconfig.json"
+      - "Dockerfile"
+      - "docker-entrypoint.sh"
+      - "car_charger_planner/config.yaml"
+      - ".github/workflows/addon-build.yml"
+  workflow_dispatch:
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        name: Read add-on version
+        run: |
+          version=$(yq -r '.version' car_charger_planner/config.yaml)
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::could not read version from car_charger_planner/config.yaml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Add-on version: $version"
+
+  build:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners per architecture: a Next.js build under QEMU emulation takes
+          # tens of minutes, a native arm64 runner takes about as long as amd64.
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/geertvdc/car-charger-planner-${{ matrix.arch }}:${{ needs.version.outputs.version }}
+            ghcr.io/geertvdc/car-charger-planner-${{ matrix.arch }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/Geertvdc/car-charger-planner
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max

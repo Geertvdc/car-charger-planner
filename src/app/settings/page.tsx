@@ -1,10 +1,15 @@
 import { prisma } from "@/lib/db";
 import { geocodeLocation, saveSettings } from "@/app/actions";
+import { probeHaConnection, type HaEntitySummary, type HaProbe } from "@/lib/ha-client";
 
 export const dynamic = "force-dynamic";
 
+const ENTITY_LIST_ID = "ha-entities";
+
 export default async function SettingsPage() {
   const s = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
+  const ha = await probeHaConnection();
+  const entities = ha.entities;
 
   return (
     <div className="space-y-4">
@@ -95,44 +100,64 @@ export default async function SettingsPage() {
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">
-            Home Assistant — outbound control (app → HA)
+            Home Assistant — connection
           </h2>
-          <p className="mb-2 text-xs text-[var(--color-muted)]">
-            The app calls your HA instance directly to control the charger. Create a{" "}
-            <strong>Long-Lived Access Token</strong> in HA (profile → Security) and paste it below.
-            This is separate from the inbound token further down, which only guards the legacy
-            poll endpoints.
-          </p>
+          <HaConnectionNotice probe={ha} />
+          <HaLiveReadings
+            probe={ha}
+            configured={[
+              ["Charger switch", s.haChargerSwitchEntityId],
+              ["Charger status", s.haChargerStatusEntityId],
+              ["Charger connected", s.haChargerConnectedEntityId],
+              ["Power meter", s.haPowerSensorEntityId],
+              ["Car SoC", s.haCarSocEntityId],
+            ]}
+          />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field
-              label="HA base URL"
+              label="HA base URL (leave blank when running as an add-on)"
               name="haBaseUrl"
               defaultValue={s.haBaseUrl}
               type="text"
             />
             <Field
-              label="HA long-lived access token"
+              label="HA long-lived access token (leave blank when running as an add-on)"
               name="haAccessToken"
               defaultValue={s.haAccessToken}
               type="password"
             />
+          </div>
+        </section>
+
+        <section>
+          <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">
+            Home Assistant — charger control
+          </h2>
+          <p className="mb-2 text-xs text-[var(--color-muted)]">
+            The app calls HA directly to start and stop charging whenever the plan is recomputed —
+            no HA automation required.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field
               label="Charger switch entity ID"
               name="haChargerSwitchEntityId"
               defaultValue={s.haChargerSwitchEntityId}
               type="text"
+              list={ENTITY_LIST_ID}
             />
             <Field
               label="Charger status entity ID (optional, read-only)"
               name="haChargerStatusEntityId"
               defaultValue={s.haChargerStatusEntityId}
               type="text"
+              list={ENTITY_LIST_ID}
             />
             <Field
               label="Charger connected entity ID (optional, read-only)"
               name="haChargerConnectedEntityId"
               defaultValue={s.haChargerConnectedEntityId}
               type="text"
+              list={ENTITY_LIST_ID}
             />
           </div>
           <p className="mb-2 text-xs text-[var(--color-muted)]">
@@ -175,6 +200,7 @@ export default async function SettingsPage() {
             name="haPowerSensorEntityId"
             defaultValue={s.haPowerSensorEntityId}
             type="text"
+            list={ENTITY_LIST_ID}
           />
         </section>
 
@@ -194,22 +220,7 @@ export default async function SettingsPage() {
             name="haCarSocEntityId"
             defaultValue={s.haCarSocEntityId}
             type="text"
-          />
-        </section>
-
-        <section>
-          <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">
-            Home Assistant — inbound token (legacy poll endpoints)
-          </h2>
-          <p className="mb-2 text-xs text-[var(--color-muted)]">
-            Only needed if you use the legacy <code>/api/ha/*</code> poll endpoints below instead
-            of (or alongside) direct control.
-          </p>
-          <Field
-            label="API token (sent by HA as Bearer to /api/ha/*)"
-            name="haToken"
-            defaultValue={s.haToken}
-            type="text"
+            list={ENTITY_LIST_ID}
           />
         </section>
 
@@ -218,59 +229,120 @@ export default async function SettingsPage() {
         </button>
       </form>
 
-      <HaDocs token={s.haToken} />
+      <EntityDatalist entities={entities} />
     </div>
   );
 }
 
-function HaDocs({ token }: { token: string }) {
-  const t = token.trim() || "YOUR_TOKEN";
-  const yaml = `# configuration.yaml — optional, only if you'd rather poll than grant write access.
-rest:
-  - resource: http://PLANNER_HOST:3000/api/ha/state
-    headers:
-      Authorization: "Bearer ${t}"
-    scan_interval: 300
-    sensor:
-      - name: "Car Charger Planner"
-        value_template: "{{ value_json.state }}"     # on | off
-        json_attributes: [until, targetSoc, reason, feasible, schedule]
+/**
+ * Suggestions for every entity ID field. Rendered once and shared via `list=` —
+ * a datalist only suggests, so a hand-typed entity ID still works when HA is
+ * unreachable and the list comes back empty.
+ */
+function EntityDatalist({ entities }: { entities: HaEntitySummary[] }) {
+  if (entities.length === 0) return null;
+  return (
+    <datalist id={ENTITY_LIST_ID}>
+      {entities.map((e) => (
+        <option key={e.entityId} value={e.entityId}>
+          {e.friendlyName}
+        </option>
+      ))}
+    </datalist>
+  );
+}
 
-automation:
-  - alias: "EV charger follows planner"
-    trigger:
-      - platform: state
-        entity_id: sensor.car_charger_planner
-    action:
-      - service: "switch.turn_{{ states('sensor.car_charger_planner') }}"
-        target:
-          entity_id: switch.my_ev_charger   # your charger switch`;
+const SOURCE_LABEL: Record<string, string> = {
+  settings: "the URL and token saved below",
+  env: "the HA_BASE_URL / HA_ACCESS_TOKEN environment variables",
+  mixed: "a mix of the saved settings and the environment variables",
+  supervisor: "the Home Assistant Supervisor (add-on mode)",
+};
+
+function HaConnectionNotice({ probe }: { probe: HaProbe }) {
+  if (!probe.config) {
+    return (
+      <p className="mb-2 text-xs text-[#ffb4a2]">
+        <strong>Not connected to Home Assistant.</strong> Nothing is configured. Install this as an
+        add-on to connect automatically, or fill in the base URL and a{" "}
+        <strong>Long-Lived Access Token</strong> (HA profile → Security) below.
+      </p>
+    );
+  }
+  if (!probe.ok) {
+    return (
+      <p className="mb-2 text-xs text-[#ffb4a2]">
+        <strong>Home Assistant is not reachable.</strong> Using{" "}
+        {SOURCE_LABEL[probe.config.source]} (<code>{probe.config.baseUrl}</code>). {probe.error}
+      </p>
+    );
+  }
+  return (
+    <p className="mb-2 text-xs text-[var(--color-muted)]">
+      <span className="text-[var(--color-accent)]">Connected.</span> Using{" "}
+      {SOURCE_LABEL[probe.config.source]} (<code>{probe.config.baseUrl}</code>), reading{" "}
+      {probe.entities.length} entities.
+    </p>
+  );
+}
+
+/** Age of an ISO timestamp as a compact "3 h" / "2 d", or null if unparseable. */
+function ageLabel(iso: string): string | null {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 60 * 48) return `${Math.round(mins / 60)} h ago`;
+  return `${Math.round(mins / (60 * 24))} d ago`;
+}
+
+/**
+ * What Home Assistant reports *right now* for each configured entity. This is the
+ * difference between "the connection is broken" and "the connection is fine but the
+ * source entity itself hasn't updated in days" — which look identical from the
+ * dashboard, since a reading is only stored once the entity's own timestamp advances.
+ */
+function HaLiveReadings({
+  probe,
+  configured,
+}: {
+  probe: HaProbe;
+  configured: [string, string][];
+}) {
+  if (!probe.ok) return null;
+  const rows = configured.filter(([, entityId]) => entityId.trim() !== "");
+  if (rows.length === 0) return null;
+  const byId = new Map(probe.entities.map((e) => [e.entityId, e]));
 
   return (
-    <div className="panel space-y-3 p-5">
-      <h2 className="text-sm font-semibold text-[var(--color-accent)]">
-        Home Assistant integration
-      </h2>
-      <p className="text-xs text-[var(--color-muted)]">
-        By default the app pushes the charger on/off decision straight to HA using the outbound
-        settings above, whenever the plan is (re)computed — no HA automation required. The
-        endpoints below are a legacy/manual fallback (send the inbound token as a{" "}
-        <code>Bearer</code> header or <code>?token=</code>):
-      </p>
-      <ul className="space-y-1 text-xs text-[var(--color-muted)]">
-        <li>
-          <code className="text-[var(--color-text)]">GET /api/ha/switch</code> → plain{" "}
-          <code>on</code>/<code>off</code>
-        </li>
-        <li>
-          <code className="text-[var(--color-text)]">GET /api/ha/state</code> → JSON with{" "}
-          <code>state</code>, <code>until</code>, <code>targetSoc</code>, <code>reason</code>,{" "}
-          <code>schedule</code>
-        </li>
-      </ul>
-      <pre className="overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs leading-relaxed text-[var(--color-text)]">
-        {yaml}
-      </pre>
+    <div className="mb-3 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+      <div className="mb-1 text-xs font-semibold text-[var(--color-text)]">
+        Live values from Home Assistant
+      </div>
+      <table className="w-full text-xs text-[var(--color-muted)]">
+        <tbody>
+          {rows.map(([label, entityId]) => {
+            const entity = byId.get(entityId.trim());
+            const age = entity ? ageLabel(entity.lastChanged) : null;
+            return (
+              <tr key={label}>
+                <td className="py-0.5 pr-3 whitespace-nowrap">{label}</td>
+                <td className="py-0.5 pr-3">
+                  <code>{entityId}</code>
+                </td>
+                <td className="py-0.5 pr-3 whitespace-nowrap">
+                  {entity ? (
+                    <span className="text-[var(--color-text)]">{entity.state}</span>
+                  ) : (
+                    <span className="text-[#ffb4a2]">no such entity in HA</span>
+                  )}
+                </td>
+                <td className="py-0.5 whitespace-nowrap">{age ? `changed ${age}` : ""}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -281,17 +353,26 @@ function Field({
   defaultValue,
   step,
   type = "number",
+  list,
 }: {
   label: string;
   name: string;
   defaultValue: string | number;
   step?: string;
   type?: string;
+  list?: string;
 }) {
   return (
     <label className="block">
       <span className="label">{label}</span>
-      <input className="input" name={name} defaultValue={defaultValue} step={step} type={type} />
+      <input
+        className="input"
+        name={name}
+        defaultValue={defaultValue}
+        step={step}
+        type={type}
+        list={list}
+      />
     </label>
   );
 }

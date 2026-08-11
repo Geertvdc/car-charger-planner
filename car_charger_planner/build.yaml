@@ -1,0 +1,10 @@
+# Images are prebuilt and pushed to GHCR by .github/workflows/addon-build.yml, so the
+# Supervisor pulls rather than builds. This file records the target architectures for
+# the build tooling; the base image is the Dockerfile's own (node:22-slim), not one of
+# the Home Assistant base images, because the add-on runs its own entrypoint.
+build_from:
+  amd64: node:22-slim
+  aarch64: node:22-slim
+labels:
+  org.opencontainers.image.source: https://github.com/Geertvdc/car-charger-planner
+  org.opencontainers.image.licenses: MIT

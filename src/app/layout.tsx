@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { Manrope, JetBrains_Mono } from "next/font/google";
+import AppLink from "@/components/AppLink";
 import NavLinks from "@/components/NavLinks";
+import { BasePathProvider } from "@/components/BasePathProvider";
+import { getBasePath } from "@/lib/base-path";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -23,11 +25,13 @@ export const metadata: Metadata = {
     "Plan EV charging on dynamic NL energy prices, solar forecast and your home availability.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const basePath = await getBasePath();
+
   return (
     <html lang="en" className={`${manrope.variable} ${jetbrainsMono.variable}`}>
       <body>
@@ -69,21 +73,23 @@ export default function RootLayout({
           />
         </div>
 
-        <div className="relative z-[1] min-h-screen">
-          <header className="sticky top-0 z-20 border-b border-white/10 bg-[rgba(6,8,13,0.72)] shadow-[0_1px_24px_rgba(0,0,0,0.3)] backdrop-blur-2xl backdrop-saturate-150">
-            <div className="mx-auto flex max-w-6xl items-center gap-6 overflow-x-auto px-4 py-3">
-              <Link
-                href="/"
-                className="flex shrink-0 items-center gap-2 whitespace-nowrap text-[15px] font-extrabold tracking-tight"
-              >
-                <span className="text-lg drop-shadow-[0_0_8px_rgba(255,201,77,0.6)]">⚡</span>
-                <span>Car Charger Planner</span>
-              </Link>
-              <NavLinks />
-            </div>
-          </header>
-          <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
-        </div>
+        <BasePathProvider value={basePath}>
+          <div className="relative z-[1] min-h-screen">
+            <header className="sticky top-0 z-20 border-b border-white/10 bg-[rgba(6,8,13,0.72)] shadow-[0_1px_24px_rgba(0,0,0,0.3)] backdrop-blur-2xl backdrop-saturate-150">
+              <div className="mx-auto flex max-w-6xl items-center gap-6 overflow-x-auto px-4 py-3">
+                <AppLink
+                  href="/"
+                  className="flex shrink-0 items-center gap-2 whitespace-nowrap text-[15px] font-extrabold tracking-tight"
+                >
+                  <span className="text-lg drop-shadow-[0_0_8px_rgba(255,201,77,0.6)]">⚡</span>
+                  <span>Car Charger Planner</span>
+                </AppLink>
+                <NavLinks />
+              </div>
+            </header>
+            <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
+          </div>
+        </BasePathProvider>
       </body>
     </html>
   );

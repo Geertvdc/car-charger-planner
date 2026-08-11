@@ -29,8 +29,9 @@ model Settings {
   // charge even without a target need (capped at CarConfig.maxSoc). Null disables it.
   cheapPriceThresholdPerKwh Float?
   historyDays        Int      @default(3)
-  haToken            String   @default("") // verifies INBOUND requests to /api/ha/* (legacy poll path)
-  // --- Outbound Home Assistant REST API client (this app -> HA) ---
+  // --- Home Assistant REST API client (this app -> HA) ---
+  // Both empty is the normal case when running as a Home Assistant add-on: the app
+  // then authenticates with the Supervisor token instead. See src/lib/ha-client.ts.
   haBaseUrl               String @default("") // e.g. http://homeassistant.local:8123, no trailing slash
   haAccessToken            String @default("") // HA long-lived access token, sent as Bearer by this app
   haChargerSwitchEntityId  String @default("") // e.g. switch.zaptec_go_2 — on/off control target

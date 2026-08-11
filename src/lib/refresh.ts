@@ -3,7 +3,7 @@ import { fetchEnergyZeroDay } from "./energyzero";
 import { fetchForecastSolarString } from "./forecastsolar";
 import { getEntityState } from "./ha-client";
 import { allInPrice } from "./pricing";
-import { addDaysISO, todayISO } from "./time";
+import { addDaysISO, localDayBoundsUTC, todayISO } from "./time";
 
 export interface RefreshResult {
   prices: { ok: boolean; count: number; error?: string };
@@ -13,14 +13,64 @@ export interface RefreshResult {
   chargerConnected: { ok: boolean; count: number; error?: string };
 }
 
+/**
+ * Past days EnergyZero returned no prices at all for. Those gaps are permanent — a day
+ * with no published prices will never gain any — so retrying them on every 30-minute
+ * tick would just be pointless traffic to a free public API. Deliberately in-memory:
+ * it clears on restart, which is exactly when another look is worth taking.
+ */
+const emptyHistoricalDays = new Set<string>();
+
+/** Test seam — the backfill skip-list is process-lifetime state. */
+export function __resetPriceBackfillCache(): void {
+  emptyHistoricalDays.clear();
+}
+
+/** Have we already stored every hour of this local day? (DST-aware: 23/24/25 hours.) */
+async function isPriceDayComplete(dateISO: string, tz: string): Promise<boolean> {
+  const { start, end } = localDayBoundsUTC(dateISO, tz);
+  const expected = Math.round((end.getTime() - start.getTime()) / 3_600_000);
+  const stored = await prisma.priceSnapshot.count({
+    where: { hourStart: { gte: start, lt: end } },
+  });
+  return stored >= expected;
+}
+
+/**
+ * Which local days to fetch. Today and tomorrow always, because tomorrow's day-ahead
+ * prices publish in the early afternoon and today's can still be corrected. Past days
+ * within the timeline's history window only when they're actually incomplete — a day
+ * the app wasn't running for leaves a hole that EnergyZero can still fill, but a day
+ * already stored in full must not be refetched every tick.
+ */
+async function pricesDatesToFetch(today: string, tz: string, historyDays: number) {
+  const dates = [today, addDaysISO(today, 1)];
+  for (let i = 1; i <= historyDays; i++) {
+    const dateISO = addDaysISO(today, -i);
+    if (emptyHistoricalDays.has(dateISO)) continue;
+    if (await isPriceDayComplete(dateISO, tz)) continue;
+    dates.push(dateISO);
+  }
+  return dates;
+}
+
 export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const tz = settings.timezone;
-  const dates = [todayISO(tz), addDaysISO(todayISO(tz), 1)];
-  try {
-    let count = 0;
-    for (const dateISO of dates) {
+  const today = todayISO(tz);
+  const dates = await pricesDatesToFetch(today, tz, settings.historyDays);
+
+  let count = 0;
+  const errors: string[] = [];
+  // Per-day error handling: a backfill day that fails must not discard prices already
+  // fetched for today/tomorrow, which are the ones the planner actually needs.
+  for (const dateISO of dates) {
+    try {
       const points = await fetchEnergyZeroDay(dateISO, tz);
+      if (points.length === 0 && dateISO < today) {
+        emptyHistoricalDays.add(dateISO);
+        continue;
+      }
       for (const p of points) {
         const allIn = allInPrice(p.rawPrice, settings);
         await prisma.priceSnapshot.upsert({
@@ -30,12 +80,14 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
         });
         count++;
       }
+    } catch (e) {
+      // Graceful: keep whatever snapshots we already have, and retry next tick.
+      errors.push(`${dateISO}: ${(e as Error).message}`);
     }
-    return { ok: true, count };
-  } catch (e) {
-    // Graceful: keep whatever snapshots we already have.
-    return { ok: false, count: 0, error: (e as Error).message };
   }
+
+  if (errors.length === 0) return { ok: true, count };
+  return { ok: false, count, error: errors.join("; ") };
 }
 
 export async function refreshSolar(): Promise<RefreshResult["solar"]> {

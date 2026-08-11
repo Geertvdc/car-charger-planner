@@ -2,9 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useAppUrl } from "./BasePathProvider";
 
 export default function RefreshButton() {
   const router = useRouter();
+  const appUrl = useAppUrl();
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -12,7 +14,7 @@ export default function RefreshButton() {
     setLoading(true);
     setMsg(null);
     try {
-      const res = await fetch("/api/refresh", { method: "POST" });
+      const res = await fetch(appUrl("/api/refresh"), { method: "POST" });
       const json = await res.json();
       setMsg(`prices ${json.prices?.count ?? 0} · solar ${json.solar?.count ?? 0}`);
       router.refresh();

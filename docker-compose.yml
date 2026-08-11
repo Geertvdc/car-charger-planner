@@ -8,13 +8,14 @@ services:
     environment:
       TZ: "Europe/Amsterdam"
       NODE_ENV: "production"
-      DATABASE_URL: "file:/app/data/app.db?connection_limit=1"
-      # Token Home Assistant must send to /api/ha/* (also editable in Settings UI).
-      HA_API_TOKEN: "${HA_API_TOKEN:-change-me}"
-      # Optional single-password gate for the UI (empty = open on LAN).
-      UI_PASSWORD: "${UI_PASSWORD:-}"
+      DATABASE_URL: "file:/data/app.db?connection_limit=1"
+      # Home Assistant connection. Not needed when running as an add-on (the Supervisor
+      # token is used automatically); for standalone Docker, create a Long-Lived Access
+      # Token in HA (profile -> Security). Both are also editable in the Settings UI.
+      HA_BASE_URL: "${HA_BASE_URL:-}"
+      HA_ACCESS_TOKEN: "${HA_ACCESS_TOKEN:-}"
     volumes:
-      - charger-data:/app/data
+      - charger-data:/data
 
 volumes:
   charger-data:

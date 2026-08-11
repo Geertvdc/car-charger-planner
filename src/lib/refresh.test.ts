@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const settingsFindUniqueOrThrow = vi.fn();
 const powerReadingCreate = vi.fn();
 const carStateFindFirst = vi.fn();
 const carStateCreate = vi.fn();
 const planStateUpdate = vi.fn();
+const priceSnapshotCount = vi.fn();
+const priceSnapshotUpsert = vi.fn();
 vi.mock("./db", () => ({
   prisma: {
     settings: { findUniqueOrThrow: (...args: unknown[]) => settingsFindUniqueOrThrow(...args) },
@@ -14,6 +16,10 @@ vi.mock("./db", () => ({
       create: (...args: unknown[]) => carStateCreate(...args),
     },
     planState: { update: (...args: unknown[]) => planStateUpdate(...args) },
+    priceSnapshot: {
+      count: (...args: unknown[]) => priceSnapshotCount(...args),
+      upsert: (...args: unknown[]) => priceSnapshotUpsert(...args),
+    },
   },
 }));
 
@@ -22,7 +28,18 @@ vi.mock("./ha-client", () => ({
   getEntityState: (...args: unknown[]) => getEntityState(...args),
 }));
 
-import { refreshCarSoc, refreshChargerConnected, refreshPower } from "./refresh";
+const fetchEnergyZeroDay = vi.fn();
+vi.mock("./energyzero", () => ({
+  fetchEnergyZeroDay: (...args: unknown[]) => fetchEnergyZeroDay(...args),
+}));
+
+import {
+  __resetPriceBackfillCache,
+  refreshCarSoc,
+  refreshChargerConnected,
+  refreshPower,
+  refreshPrices,
+} from "./refresh";
 
 describe("refreshPower", () => {
   beforeEach(() => {
@@ -253,5 +270,120 @@ describe("refreshChargerConnected", () => {
     const result = await refreshChargerConnected();
     expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
     expect(planStateUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe("refreshPrices backfill", () => {
+  const TZ = "Europe/Amsterdam";
+  // Fixed clock so "today" is deterministic: 2026-08-09 local.
+  const NOW = new Date("2026-08-09T10:00:00Z");
+
+  function settings(historyDays = 3) {
+    return {
+      timezone: TZ,
+      historyDays,
+      energyTaxPerKwh: 0.1,
+      supplierFeePerKwh: 0.02,
+      vatRate: 0.21,
+    };
+  }
+
+  /** One priced hour, so a fetched day is distinguishable from an empty one. */
+  function onePoint(dateISO: string) {
+    return [{ hourStart: new Date(`${dateISO}T00:00:00Z`), rawPrice: 0.1 }];
+  }
+
+  function fetchedDates() {
+    return fetchEnergyZeroDay.mock.calls.map((c) => c[0] as string);
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    __resetPriceBackfillCache();
+    settingsFindUniqueOrThrow.mockReset().mockResolvedValue(settings());
+    priceSnapshotUpsert.mockReset().mockResolvedValue({});
+    priceSnapshotCount.mockReset().mockResolvedValue(24); // history complete by default
+    fetchEnergyZeroDay.mockReset().mockImplementation((d: string) => onePoint(d));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("fetches only today and tomorrow when history is already complete", async () => {
+    const result = await refreshPrices();
+    expect(fetchedDates()).toEqual(["2026-08-09", "2026-08-10"]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("backfills a past day that is missing entirely", async () => {
+    // 2026-08-07 has no stored hours; the other history days are complete.
+    priceSnapshotCount.mockImplementation(({ where }: { where: { hourStart: { gte: Date } } }) =>
+      where.hourStart.gte.toISOString().startsWith("2026-08-06") ? 0 : 24
+    );
+    const result = await refreshPrices();
+    expect(fetchedDates()).toContain("2026-08-07");
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(3); // today + tomorrow + the backfilled day
+  });
+
+  it("backfills a partially stored day (interrupted mid-fetch)", async () => {
+    priceSnapshotCount.mockResolvedValue(11);
+    await refreshPrices();
+    expect(fetchedDates()).toEqual([
+      "2026-08-09",
+      "2026-08-10",
+      "2026-08-08",
+      "2026-08-07",
+      "2026-08-06",
+    ]);
+  });
+
+  it("honours historyDays as the backfill window", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue(settings(1));
+    priceSnapshotCount.mockResolvedValue(0);
+    await refreshPrices();
+    expect(fetchedDates()).toEqual(["2026-08-09", "2026-08-10", "2026-08-08"]);
+  });
+
+  it("stops retrying a past day EnergyZero has no prices for", async () => {
+    priceSnapshotCount.mockResolvedValue(0);
+    fetchEnergyZeroDay.mockImplementation((d: string) => (d >= "2026-08-09" ? onePoint(d) : []));
+
+    await refreshPrices();
+    expect(fetchedDates()).toContain("2026-08-08");
+
+    fetchEnergyZeroDay.mockClear();
+    await refreshPrices();
+    // Second pass: today/tomorrow only — the empty history days aren't asked again.
+    expect(fetchedDates()).toEqual(["2026-08-09", "2026-08-10"]);
+  });
+
+  it("keeps today/tomorrow's prices when a backfill day fails", async () => {
+    priceSnapshotCount.mockResolvedValue(0);
+    fetchEnergyZeroDay.mockImplementation((d: string) => {
+      if (d === "2026-08-08") throw new Error("EnergyZero 503");
+      return onePoint(d);
+    });
+    const result = await refreshPrices();
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("2026-08-08");
+    expect(result.count).toBe(4); // today, tomorrow, and the two history days that worked
+    expect(priceSnapshotUpsert).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries a failed backfill day on the next refresh", async () => {
+    priceSnapshotCount.mockResolvedValue(0);
+    fetchEnergyZeroDay.mockImplementationOnce((d: string) => onePoint(d)) // today
+      .mockImplementationOnce((d: string) => onePoint(d)) // tomorrow
+      .mockImplementationOnce(() => {
+        throw new Error("network");
+      });
+    await refreshPrices();
+
+    fetchEnergyZeroDay.mockClear().mockImplementation((d: string) => onePoint(d));
+    await refreshPrices();
+    expect(fetchedDates()).toContain("2026-08-08");
   });
 });

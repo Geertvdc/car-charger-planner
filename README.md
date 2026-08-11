@@ -6,8 +6,11 @@ A self-hosted web app that decides **when to charge your EV at home**, optimizin
 readiness target** (e.g. "80% by 07:00 on weekdays").
 
 It talks to **Home Assistant** over HA's REST API and pushes the charger on/off
-decision itself whenever the plan is (re)computed — no HA automation required, though a
-poll-based fallback exists if you'd rather not grant it write access.
+decision itself whenever the plan is (re)computed — no HA automation required.
+
+Install it as a **Home Assistant add-on** and it runs inside HA as a sidebar panel with
+no connection setup at all, or run it standalone with Docker. See
+[Install as a Home Assistant add-on](#install-as-a-home-assistant-add-on).
 
 ## Why this exists
 
@@ -65,9 +68,7 @@ no fixed weekly schedule), use evcc instead.
   non-goal, not a missing feature.
 - **The app is the controller, not just an advisor.** It pushes on/off decisions to HA
   directly (`switch.turn_on`/`turn_off` on a configured entity) whenever the plan is
-  recomputed, rather than only displaying a recommendation someone has to act on. A
-  legacy poll-based mode (HA polls a `/api/ha/state` endpoint and flips the switch
-  itself) is kept for anyone who'd rather not grant write access.
+  recomputed, rather than only displaying a recommendation someone has to act on.
   See [How the plan is computed](#how-the-plan-is-computed) and
   [Home Assistant integration](#home-assistant-integration).
 - **Home/away is a first-class weekly schedule, not a toggle.** A weekly template
@@ -105,8 +106,9 @@ no fixed weekly schedule), use evcc instead.
 - **Charger-connected override** — if HA reports a car physically plugged in, the
   current hour counts as home even if the schedule says away.
 - **Direct Home Assistant control** — the app pushes charger on/off to HA via its REST
-  API whenever the plan changes. Legacy poll endpoints remain available as a
-  read-only/manual-fallback surface, guarded by a bearer token.
+  API whenever the plan changes.
+- **Installs as a Home Assistant add-on** — sidebar panel via Ingress, authenticated
+  through the Supervisor with no URL or token to configure.
 - **Simulation mode** — fast-forward "now" to test the planner at any time of day
   without touching real hardware.
 
@@ -126,18 +128,63 @@ npm run db:seed         # optional: example weekly pattern + defaults
 npm run dev             # http://localhost:3000
 ```
 
+### Configuration from .env
+
+Settings live in the database, which means a fresh one — a new git worktree, a rebuilt
+container, a wiped volume — starts blank and the app silently controls nothing until the
+entity IDs are re-entered. To make that reproducible, every Home Assistant field can be
+seeded from the environment (see [.env.example](.env.example) for the full list):
+
+```
+HA_BASE_URL, HA_ACCESS_TOKEN, HA_CHARGER_SWITCH_ENTITY_ID, HA_CHARGER_STATUS_ENTITY_ID,
+HA_CHARGER_CONNECTED_ENTITY_ID, HA_POWER_SENSOR_ENTITY_ID, HA_CAR_SOC_ENTITY_ID,
+HA_CHARGER_ON_SERVICE, HA_CHARGER_OFF_SERVICE
+```
+
+On every boot, [`seedSettingsFromEnv()`](src/lib/bootstrap.ts) copies each value into the
+Settings row **only while that field still holds its default**. So the database stays the
+source of truth and anything edited in the UI is never overwritten — `.env` is just the
+starting point. The boot log names the fields it seeded, never their values.
+
+Keep your real `.env` out of git (it already is, via `.gitignore`): it holds a live
+long-lived access token. Revoke it in HA under profile → Security if it ever leaks.
+
+## Install as a Home Assistant add-on
+
+Requires **Home Assistant OS** or **Supervised** (the Supervisor is what runs add-ons;
+HA Container/Core users should use Docker below).
+
+1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add
+   `https://github.com/Geertvdc/car-charger-planner`.
+2. Install **Car Charger Planner**, start it, and enable **Show in sidebar**.
+
+That's the whole setup — no URL, no token. The add-on reaches Home Assistant through the
+Supervisor (`homeassistant_api: true`), so it can read your entities and call services
+using credentials the Supervisor injects. The entity fields on the **Settings** page
+suggest the entities your HA actually has, and its database lives on the add-on's `/data`
+volume, so it's covered by Home Assistant backups.
+
+The UI is served through **Ingress**, which means it appears in the HA sidebar and is
+protected by HA's own login — nothing is exposed on a host port. See
+[Ingress support](#ingress-support) for how that works.
+
+Add-on files live in [`car_charger_planner/`](car_charger_planner/), with
+[`repository.yaml`](repository.yaml) making the repo an add-on store. Images are built
+for `amd64` and `aarch64` and pushed to GHCR by
+[`.github/workflows/addon-build.yml`](.github/workflows/addon-build.yml); bumping
+`version` in `car_charger_planner/config.yaml` is what publishes a release.
+
 ## Run with Docker
 
 ```bash
-HA_API_TOKEN=your-secret docker compose up --build
+docker compose up --build
 ```
 
-- App on `http://<host>:3000`, SQLite persisted in the `charger-data` volume.
-- The container runs `prisma db push` on start, then the standalone server.
-- Set `HA_API_TOKEN` (compose env) or the token in **Settings** to require auth on the
-  legacy HA poll endpoints. Leave empty for an open LAN.
-- For direct HA control, set `HA_BASE_URL` / `HA_ACCESS_TOKEN` (compose env) or the
-  equivalent fields in **Settings**.
+- App on `http://<host>:3000`, SQLite persisted in the `charger-data` volume at `/data`.
+- The container runs `prisma db push` on start, then the server.
+- Set `HA_BASE_URL` / `HA_ACCESS_TOKEN` (compose env) or the equivalent fields in
+  **Settings** so it can reach Home Assistant. Create the token in HA under your profile
+  → Security → Long-Lived Access Tokens.
 
 ## Configure
 
@@ -162,17 +209,23 @@ is set), so testing the plan can never accidentally flip your real hardware. Cli
 **Back to live** to return to the real clock and resume control. Only today/tomorrow
 have price & solar data, so keep the simulated time within that window.
 
-Note: the legacy poll-based mode is *not* covered by this guard — if HA is polling
-`/api/ha/state`/`/api/ha/switch` itself, it will still receive the simulated decision.
-Prefer direct push control (the default) if you use simulation regularly.
-
 ## Home Assistant integration
 
-The app connects to HA as an outbound REST client and pushes control directly — set
-these in **Settings**:
+The app connects to HA as an outbound REST client and pushes control directly.
 
-- **HA base URL** — e.g. `http://homeassistant.local:8123`
-- **HA long-lived access token** — create one in HA under your profile → Security
+**Authentication** resolves in this order, first complete pair wins:
+
+1. **HA base URL + token** in **Settings** — an explicit override.
+2. `HA_BASE_URL` + `HA_ACCESS_TOKEN` environment variables — for Docker.
+3. **The Supervisor token**, injected automatically when running as an add-on. Requests
+   go to `http://supervisor/core/api`, and no configuration is needed.
+
+So an add-on install needs nothing, a Docker install needs a long-lived access token
+(HA profile → Security), and an add-on can still be pointed at a different HA instance by
+filling in the Settings fields. The Settings page reports which of the three is in use.
+
+Then set, in **Settings**:
+
 - **Charger switch entity ID** — the entity ID passed as the service call target, e.g.
   `switch.zaptec_go_2`
 - **On/off service** — the HA service called for each action, as `domain.service`.
@@ -232,32 +285,27 @@ schedule. Checked in the background roughly every 10 minutes (and on every manua
 **Refresh data & plan**), not on every interactive save, so it never adds a live HA
 round-trip to actions like dragging the target slider.
 
-### Legacy poll-based mode (optional)
+### Ingress support
 
-If you'd rather not grant the app write access to HA, you can instead have HA poll it
-and flip the switch itself. The **Settings** page renders a copy-paste snippet. In short:
+Home Assistant serves add-ons under a per-install path like
+`/api/hassio_ingress/<token>`, strips that prefix before forwarding, and passes the
+original in an `X-Ingress-Path` header. Next.js bakes root-absolute `/_next/...` asset
+URLs into its output at build time and `basePath` can't be set per request, so two
+pieces close the gap:
 
-```yaml
-rest:
-  - resource: http://PLANNER_HOST:3000/api/ha/state
-    headers:
-      Authorization: "Bearer YOUR_TOKEN"
-    scan_interval: 300
-    sensor:
-      - name: "Car Charger Planner"
-        value_template: "{{ value_json.state }}"     # on | off
-        json_attributes: [until, targetSoc, reason, feasible, schedule]
+- **The app** reads `X-Ingress-Path` ([`src/lib/base-path.ts`](src/lib/base-path.ts)) and
+  prefixes what it controls — link hrefs and client-side `fetch` URLs — via a context
+  provider. Behind Ingress, navigation falls back to full page loads, because the
+  app-router client would otherwise navigate to the prefixed path while the server
+  answers for the unprefixed one.
+- **A small reverse proxy** ([`src/ingress/`](src/ingress/)) fronts `next start` and
+  rewrites what the app can't: `/_next/` URLs in HTML, CSS, JS chunks and flight
+  payloads, plus `Link:` preload and `Location:` redirect headers.
 
-automation:
-  - alias: "EV charger follows planner"
-    trigger:
-      - platform: state
-        entity_id: sensor.car_charger_planner
-    action:
-      - service: "switch.turn_{{ states('sensor.car_charger_planner') }}"
-        target:
-          entity_id: switch.my_ev_charger
-```
+The header is untrusted input, so it's validated down to a plain path before being
+concatenated into URLs or substituted into response bodies. Without the header the proxy
+is a transparent pass-through, which is why the same image serves both the add-on and
+plain Docker.
 
 ## How the plan is computed
 
@@ -287,8 +335,8 @@ that threshold, even without a deadline requiring it.
 src/
   app/                 Next.js App Router — pages (dashboard, settings, schedule,
                         upcoming, config) + server actions (app/actions.ts) + API routes
-                        under app/api/ (HA poll endpoints, manual SoC entry, refresh,
-                        simulation, day overrides)
+                        under app/api/ (manual SoC entry, refresh, simulation,
+                        day overrides)
   components/          Client-side UI (timeline, stat tiles, simulation bar, nav)
   lib/
     engine.ts           Pure scheduling algorithm: hours + deadlines + config -> PlanResult
@@ -307,6 +355,9 @@ src/
     availability.ts         Weekly template + day overrides -> home/away per hour
     pricing.ts, time.ts, now.ts   All-in price calc, timezone-aware date helpers,
                                    simulated-vs-real "now"
+  ingress/               Reverse proxy fronting `next start` so the app works behind
+                          Home Assistant Ingress (rewrite.ts holds the pure URL-rewriting
+                          logic; index.ts is the container entrypoint)
   worker/index.ts        Optional standalone entrypoint that just calls
                           startScheduler() — for running the scheduler in a separate
                           container instead of in-process (set DISABLE_SCHEDULER=1 on
@@ -315,6 +366,9 @@ src/
                           singleton Settings/CarConfig/PlanState rows exist, then
                           starts the in-process scheduler (unless DISABLE_SCHEDULER=1)
 prisma/schema.prisma    Data model — see inline comments for every field
+car_charger_planner/    Home Assistant add-on manifest (config.yaml, build.yaml, docs,
+                         icon/logo); repository.yaml at the repo root makes this repo
+                         installable as an add-on store
 ```
 
 **Data flow, once running:** the scheduler (`scheduler.ts`) refreshes prices/solar/HA

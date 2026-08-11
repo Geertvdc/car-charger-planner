@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AvailStatus } from "@/lib/availability";
 import type { TimelineData, TimelineDay, TimelineHour } from "@/lib/timeline";
+import { useAppUrl } from "./BasePathProvider";
 
 const COL = 30; // px per hour
 const PAD_X = 10;
@@ -44,6 +45,7 @@ function availFill(status: string): string {
 
 export default function Timeline({ data }: { data: TimelineData }) {
   const router = useRouter();
+  const appUrl = useAppUrl();
   const [hover, setHover] = useState<{ h: TimelineHour; day: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const todayRef = useRef<HTMLDivElement>(null);
@@ -75,7 +77,7 @@ export default function Timeline({ data }: { data: TimelineData }) {
   const nowMs = new Date(data.now).getTime();
 
   async function saveOverride(body: Record<string, unknown>) {
-    await fetch("/api/day/override", {
+    await fetch(appUrl("/api/day/override"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

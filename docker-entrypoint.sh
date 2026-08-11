@@ -1,11 +1,19 @@
 #!/bin/sh
 set -e
 
-# Ensure the SQLite schema exists / is up to date on the mounted volume.
+# As a Home Assistant add-on the persistent volume is /data; as a plain Docker
+# container it's whatever the compose file mounts there. Either way the schema is
+# synced onto it before the server starts.
+DATA_DIR="$(dirname "${DATA_FILE:-/data/app.db}")"
+mkdir -p "$DATA_DIR"
+
+echo "[entrypoint] syncing database schema..."
 # Invoke the CLI from its package path so it finds its sibling .wasm files
 # (a copied .bin/prisma symlink loses them).
-echo "[entrypoint] syncing database schema..."
 node node_modules/prisma/build/index.js db push --skip-generate --accept-data-loss
 
-echo "[entrypoint] starting server..."
-exec node_modules/.bin/next start -H 0.0.0.0 -p "${PORT:-3000}"
+echo "[entrypoint] starting server on :${PORT:-3000}..."
+# The ingress entrypoint runs `next start` on a loopback port and fronts it with a
+# proxy that adapts responses for Home Assistant Ingress. Served directly (no
+# X-Ingress-Path header) the proxy is a transparent pass-through.
+exec node_modules/.bin/tsx src/ingress/index.ts

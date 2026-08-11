@@ -64,7 +64,6 @@ export async function saveSettings(formData: FormData) {
       houseLoadFactor: Math.min(1, Math.max(0, num(formData.get("houseLoadFactor"), 0.7))),
       cheapPriceThresholdPerKwh: numOrNull(formData.get("cheapPriceThresholdPerKwh")),
       historyDays: Math.max(0, Math.round(num(formData.get("historyDays"), 3))),
-      haToken: str(formData.get("haToken")),
       haBaseUrl: str(formData.get("haBaseUrl")).trim().replace(/\/+$/, ""),
       haAccessToken: str(formData.get("haAccessToken")),
       haChargerSwitchEntityId: str(formData.get("haChargerSwitchEntityId")).trim(),
