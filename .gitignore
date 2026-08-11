@@ -443,3 +443,7 @@ prisma/dev.db*
 
 # TS incremental build info
 tsconfig.tsbuildinfo
+
+# Local env backups (never commit — may contain live tokens)
+.env.bak
+.env.*.bak
