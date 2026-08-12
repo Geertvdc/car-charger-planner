@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { geocodeLocation, saveSettings } from "@/app/actions";
 import { probeHaConnection, type HaEntitySummary, type HaProbe } from "@/lib/ha-client";
+import { chargerControlStatus } from "@/lib/ha-control";
 
 export const dynamic = "force-dynamic";
 
@@ -137,6 +138,7 @@ export default async function SettingsPage() {
             The app calls HA directly to start and stop charging whenever the plan is recomputed —
             no HA automation required.
           </p>
+          <ChargerControlNotice />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field
               label="Charger switch entity ID"
@@ -262,6 +264,37 @@ const SOURCE_LABEL: Record<string, string> = {
   mixed: "a mix of the saved settings and the environment variables",
   supervisor: "the Home Assistant Supervisor (add-on mode)",
 };
+
+/**
+ * A dev copy is deliberately barred from switching real hardware. Say so plainly —
+ * otherwise it looks configured and simply never acts, which is far more confusing
+ * than a stated limitation.
+ */
+function ChargerControlNotice() {
+  const { enabled, reason } = chargerControlStatus();
+  if (enabled) {
+    if (reason !== "explicitly-allowed") return null;
+    return (
+      <p className="mb-2 text-xs text-[#ffb4a2]">
+        <strong>Charger control is force-enabled</strong> via <code>ALLOW_CHARGER_CONTROL</code>.
+        This instance will switch your real charger — make sure no other copy is doing the same.
+      </p>
+    );
+  }
+  return (
+    <p className="mb-2 text-xs text-[#ffb4a2]">
+      <strong>Charger control is disabled in this instance</strong>
+      {reason === "explicitly-disabled" ? (
+        <> — <code>DISABLE_CHARGER_CONTROL</code> is set.</>
+      ) : (
+        <> because it is not running in production (e.g. <code>npm run dev</code>).</>
+      )}{" "}
+      The plan is still computed and shown, but nothing is sent to Home Assistant, so this copy
+      can&apos;t fight the deployment that owns your charger. Set{" "}
+      <code>ALLOW_CHARGER_CONTROL=1</code> to override.
+    </p>
+  );
+}
 
 function HaConnectionNotice({ probe }: { probe: HaProbe }) {
   if (!probe.config) {

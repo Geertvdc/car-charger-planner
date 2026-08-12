@@ -149,6 +149,24 @@ starting point. The boot log names the fields it seeded, never their values.
 Keep your real `.env` out of git (it already is, via `.gitignore`): it holds a live
 long-lived access token. Revoke it in HA under profile → Security if it ever leaks.
 
+### Only one instance drives the charger
+
+Copying that `.env` into a second checkout would otherwise give two instances working
+credentials for the same charger switch, and they would fight over it — one turning it on
+as the other turns it off, at up to one write per minute each.
+
+So **switching the real charger is gated on `NODE_ENV=production`**. Docker and the add-on
+both set it and behave normally; `npm run dev` computes and displays the plan but sends
+nothing to Home Assistant, and the Settings page says so rather than looking configured and
+silently doing nothing. Override with `ALLOW_CHARGER_CONTROL=1` (force on, to test control
+from a dev copy) or `DISABLE_CHARGER_CONTROL=1` (force off, e.g. a read-only replica —
+this one wins if both are set).
+
+The gate sits in `syncChargerState()` ([ha-control.ts](src/lib/ha-control.ts)), the single
+point that talks to hardware. `DISABLE_SCHEDULER=1` is *not* a substitute: it only stops the
+background timers, while `recomputePlan()` — and therefore a charger push — also runs from
+every settings save, timeline edit and manual refresh.
+
 ## Install as a Home Assistant add-on
 
 Requires **Home Assistant OS** or **Supervised** (the Supervisor is what runs add-ons;

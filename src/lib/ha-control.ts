@@ -9,6 +9,48 @@ const DEFAULT_OFF_SERVICE = "switch.turn_off";
 // tick) retries and catches up once the cooldown has passed.
 const MIN_PUSH_INTERVAL_MS = 60_000;
 
+export type ChargerControlReason =
+  | "production"
+  | "explicitly-allowed"
+  | "explicitly-disabled"
+  | "non-production";
+
+export interface ChargerControlStatus {
+  enabled: boolean;
+  reason: ChargerControlReason;
+}
+
+function isTruthy(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
+}
+
+/**
+ * Whether this instance is allowed to operate real hardware.
+ *
+ * A development copy pointed at a live Home Assistant is genuinely dangerous: the
+ * charger switch would be shared with the deployment that actually owns it, and the
+ * two would fight over it. Guarding the scheduler is not enough — recomputePlan()
+ * runs from every settings save, timeline edit and manual refresh too, and each of
+ * those ends here. So the gate lives at the single point that talks to hardware, and
+ * defaults to *off* outside production: `npm run dev` never touches your charger.
+ *
+ * Docker and the add-on both set NODE_ENV=production and so control normally.
+ * DISABLE_CHARGER_CONTROL forces off (useful for a read-only production replica);
+ * ALLOW_CHARGER_CONTROL forces on, to deliberately test control from a dev copy.
+ */
+export function chargerControlStatus(): ChargerControlStatus {
+  if (isTruthy(process.env.DISABLE_CHARGER_CONTROL)) {
+    return { enabled: false, reason: "explicitly-disabled" };
+  }
+  if (isTruthy(process.env.ALLOW_CHARGER_CONTROL)) {
+    return { enabled: true, reason: "explicitly-allowed" };
+  }
+  if (process.env.NODE_ENV === "production") {
+    return { enabled: true, reason: "production" };
+  }
+  return { enabled: false, reason: "non-production" };
+}
+
 /** Parse "domain.service" notation; falls back to the given default if malformed. */
 function parseService(raw: string | undefined, fallback: string): { domain: string; service: string } {
   const value = raw?.trim() || fallback;
@@ -27,6 +69,10 @@ function parseService(raw: string | undefined, fallback: string): { domain: stri
  * next recomputePlan() call, since haSyncOn is only updated on success.
  */
 export async function syncChargerState(chargingNow: boolean): Promise<void> {
+  // Checked before anything else: a dev copy must not reach real hardware even to
+  // read the settings row that would tell it which entity to switch.
+  if (!chargerControlStatus().enabled) return;
+
   const settings = await prisma.settings.findUnique({ where: { id: 1 } });
   // Simulation mode computes a plan for a fake "now" — never let that reach real
   // hardware. Only the live clock is allowed to control the actual charger.

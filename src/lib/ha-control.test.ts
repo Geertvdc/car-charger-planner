@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const settingsFindUnique = vi.fn();
 const planStateFindUnique = vi.fn();
@@ -18,7 +18,7 @@ vi.mock("./ha-client", () => ({
   callHaService: (...args: unknown[]) => callHaService(...args),
 }));
 
-import { syncChargerState } from "./ha-control";
+import { chargerControlStatus, syncChargerState } from "./ha-control";
 
 describe("syncChargerState", () => {
   beforeEach(() => {
@@ -26,6 +26,13 @@ describe("syncChargerState", () => {
     planStateFindUnique.mockReset();
     planStateUpdate.mockReset().mockResolvedValue({});
     callHaService.mockReset();
+    // Tests run with NODE_ENV=test, where control is off by default. These cases are
+    // about the push logic itself, so opt in explicitly; the gate has its own tests.
+    vi.stubEnv("ALLOW_CHARGER_CONTROL", "1");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("no-ops when no charger switch entity is configured", async () => {
@@ -158,6 +165,85 @@ describe("syncChargerState", () => {
     await syncChargerState(false);
     expect(callHaService).toHaveBeenLastCalledWith("switch", "turn_off", {
       entity_id: "switch.zaptec_go_2",
+    });
+  });
+});
+
+describe("chargerControlStatus", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("is off outside production, so a dev copy never drives real hardware", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    expect(chargerControlStatus()).toEqual({ enabled: false, reason: "non-production" });
+  });
+
+  it("is on in production (Docker and the add-on both set NODE_ENV=production)", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    expect(chargerControlStatus()).toEqual({ enabled: true, reason: "production" });
+  });
+
+  it("can be forced on from a dev copy to test control deliberately", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("ALLOW_CHARGER_CONTROL", "1");
+    expect(chargerControlStatus()).toEqual({ enabled: true, reason: "explicitly-allowed" });
+  });
+
+  it("can be forced off in production, for a read-only replica", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DISABLE_CHARGER_CONTROL", "true");
+    expect(chargerControlStatus()).toEqual({ enabled: false, reason: "explicitly-disabled" });
+  });
+
+  it("lets disable win over allow, so the safe setting cannot be overridden by accident", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ALLOW_CHARGER_CONTROL", "1");
+    vi.stubEnv("DISABLE_CHARGER_CONTROL", "1");
+    expect(chargerControlStatus().enabled).toBe(false);
+  });
+
+  it("accepts the usual truthy spellings and ignores anything else", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    for (const v of ["1", "true", "TRUE", "yes", "on"]) {
+      vi.stubEnv("ALLOW_CHARGER_CONTROL", v);
+      expect(chargerControlStatus().enabled).toBe(true);
+    }
+    for (const v of ["0", "false", "", "  ", "maybe"]) {
+      vi.stubEnv("ALLOW_CHARGER_CONTROL", v);
+      expect(chargerControlStatus().enabled).toBe(false);
+    }
+  });
+});
+
+describe("syncChargerState control gate", () => {
+  beforeEach(() => {
+    settingsFindUnique.mockReset();
+    callHaService.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("does not even read settings when control is disabled", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    await syncChargerState(true);
+    expect(callHaService).not.toHaveBeenCalled();
+    expect(settingsFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("pushes normally once production re-enables control", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    settingsFindUnique.mockResolvedValue({
+      haChargerSwitchEntityId: "switch.zaptec_go_2_charging",
+      haChargerOnService: "switch.turn_on",
+    });
+    planStateFindUnique.mockResolvedValue({ haSyncOn: false, haSyncAt: null });
+    callHaService.mockResolvedValue(undefined);
+    await syncChargerState(true);
+    expect(callHaService).toHaveBeenCalledWith("switch", "turn_on", {
+      entity_id: "switch.zaptec_go_2_charging",
     });
   });
 });
