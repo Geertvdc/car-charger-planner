@@ -246,7 +246,7 @@ describe("refreshChargerConnected", () => {
     expect(result).toEqual({ ok: true, count: 1 });
     expect(planStateUpdate).toHaveBeenCalledWith({
       where: { id: 1 },
-      data: { chargerConnected: true },
+      data: { chargerConnected: true, chargerReportedCharging: false },
     });
   });
 
@@ -259,7 +259,7 @@ describe("refreshChargerConnected", () => {
     expect(result).toEqual({ ok: true, count: 1 });
     expect(planStateUpdate).toHaveBeenCalledWith({
       where: { id: 1 },
-      data: { chargerConnected: false },
+      data: { chargerConnected: false, chargerReportedCharging: false },
     });
   });
 
@@ -304,7 +304,7 @@ describe("refreshPrices backfill", () => {
     __resetPriceBackfillCache();
     settingsFindUniqueOrThrow.mockReset().mockResolvedValue(settings());
     priceSnapshotUpsert.mockReset().mockResolvedValue({});
-    priceSnapshotCount.mockReset().mockResolvedValue(24); // history complete by default
+    priceSnapshotCount.mockReset().mockResolvedValue(96); // history complete by default (96 x 15-min slots)
     fetchEnergyZeroDay.mockReset().mockImplementation((d: string) => onePoint(d));
   });
 
@@ -321,7 +321,7 @@ describe("refreshPrices backfill", () => {
   it("backfills a past day that is missing entirely", async () => {
     // 2026-08-07 has no stored hours; the other history days are complete.
     priceSnapshotCount.mockImplementation(({ where }: { where: { hourStart: { gte: Date } } }) =>
-      where.hourStart.gte.toISOString().startsWith("2026-08-06") ? 0 : 24
+      where.hourStart.gte.toISOString().startsWith("2026-08-06") ? 0 : 96
     );
     const result = await refreshPrices();
     expect(fetchedDates()).toContain("2026-08-07");
@@ -330,7 +330,7 @@ describe("refreshPrices backfill", () => {
   });
 
   it("backfills a partially stored day (interrupted mid-fetch)", async () => {
-    priceSnapshotCount.mockResolvedValue(11);
+    priceSnapshotCount.mockResolvedValue(40);
     await refreshPrices();
     expect(fetchedDates()).toEqual([
       "2026-08-09",
@@ -427,13 +427,22 @@ describe("refreshChargerConnected", () => {
     getEntityState.mockReset();
   });
 
-  it("stores connected=true while the car is plugged in", async () => {
+  it("stores connected=true and reportedCharging=true while actively charging", async () => {
     getEntityState.mockResolvedValue({ state: "connected_charging", attributes: {}, last_changed: "" });
     const result = await refreshChargerConnected();
     expect(result).toEqual({ ok: true, count: 1 });
     expect(planStateUpdate).toHaveBeenCalledWith({
       where: { id: 1 },
-      data: { chargerConnected: true },
+      data: { chargerConnected: true, chargerReportedCharging: true },
+    });
+  });
+
+  it("stores connected=true but reportedCharging=false when plugged in but not drawing power", async () => {
+    getEntityState.mockResolvedValue({ state: "connected_requesting", attributes: {}, last_changed: "" });
+    await refreshChargerConnected();
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { chargerConnected: true, chargerReportedCharging: false },
     });
   });
 
@@ -442,7 +451,7 @@ describe("refreshChargerConnected", () => {
     await refreshChargerConnected();
     expect(planStateUpdate).toHaveBeenCalledWith({
       where: { id: 1 },
-      data: { chargerConnected: false },
+      data: { chargerConnected: false, chargerReportedCharging: false },
     });
   });
 

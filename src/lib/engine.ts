@@ -1,4 +1,5 @@
 import type { AvailStatus } from "./availability";
+import { floorToSlot } from "./time";
 
 export interface EngineHour {
   hourStart: Date;
@@ -25,6 +26,7 @@ export interface EngineInput {
   feedInTariffPerKwh: number; // opportunity cost of self-consumed solar
   maxSoc?: number; // %, cap for opportunistic cheap charging (default 100)
   cheapPriceThresholdPerKwh?: number | null; // charge below this effective cost even without target need
+  slotHours?: number; // duration of each `hours` bucket, in hours (default 1)
 }
 
 export interface MultiEngineInput {
@@ -39,6 +41,7 @@ export interface MultiEngineInput {
   feedInTariffPerKwh: number;
   maxSoc?: number; // %, cap for opportunistic cheap charging (default 100)
   cheapPriceThresholdPerKwh?: number | null; // charge below this effective cost even without target need
+  slotHours?: number; // duration of each `hours` bucket, in hours (default 1)
 }
 
 export interface PlanSlot {
@@ -79,13 +82,16 @@ function metricsFor(
   chargerPowerKw: number,
   efficiency: number,
   houseLoadFactor: number,
-  feedInTariffPerKwh: number
+  feedInTariffPerKwh: number,
+  slotHours: number
 ): HourMetrics {
-  const solarKw = Math.max(0, (h.solarWh / 1000) * houseLoadFactor);
-  const gridKw = Math.max(0, chargerPowerKw - solarKw);
-  const gridKwhFull = gridKw;
-  const solarKwhFull = Math.min(solarKw, chargerPowerKw);
-  const batteryCapKwh = chargerPowerKw * efficiency;
+  // h.solarWh is the energy forecast for this bucket; divide by its duration to get an
+  // average kW so the comparison against chargerPowerKw (also kW) holds at any slot size.
+  const solarAvgKw = Math.max(0, (h.solarWh / 1000 / slotHours) * houseLoadFactor);
+  const gridKw = Math.max(0, chargerPowerKw - solarAvgKw);
+  const gridKwhFull = gridKw * slotHours;
+  const solarKwhFull = Math.min(solarAvgKw, chargerPowerKw) * slotHours;
+  const batteryCapKwh = chargerPowerKw * efficiency * slotHours;
   const hourCostFull = gridKwhFull * h.allInPrice + solarKwhFull * feedInTariffPerKwh;
   const effectiveCostPerKwh = batteryCapKwh > 0 ? hourCostFull / batteryCapKwh : Infinity;
   return {
@@ -120,10 +126,10 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
     feedInTariffPerKwh,
     maxSoc = 100,
     cheapPriceThresholdPerKwh = null,
+    slotHours = 1,
   } = input;
 
-  const nowHour = new Date(now);
-  nowHour.setUTCMinutes(0, 0, 0);
+  const nowHour = floorToSlot(now);
 
   const metrics = new Map<number, HourMetrics>();
   for (const h of hours) {
@@ -131,7 +137,7 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
     if (h.hourStart < nowHour) continue;
     metrics.set(
       h.hourStart.getTime(),
-      metricsFor(h, chargerPowerKw, efficiency, houseLoadFactor, feedInTariffPerKwh)
+      metricsFor(h, chargerPowerKw, efficiency, houseLoadFactor, feedInTariffPerKwh, slotHours)
     );
   }
 
@@ -241,9 +247,11 @@ export function computeMultiPlan(input: MultiEngineInput): PlanResult {
   if (energyNeededTotal <= 1e-6 && cheapKwh <= 1e-6) {
     reason = "Already at/above every upcoming target.";
   } else if (feasible) {
-    reason = `Charging ${scheduledKwh.toFixed(1)} kWh across ${onSet.size} h for ~€${totalCost.toFixed(
+    reason = `Charging ${scheduledKwh.toFixed(1)} kWh across ${(onSet.size * slotHours).toFixed(
       2
-    )} to meet ${sortedDeadlines.length} deadline${sortedDeadlines.length > 1 ? "s" : ""}.`;
+    )} h for ~€${totalCost.toFixed(2)} to meet ${sortedDeadlines.length} deadline${
+      sortedDeadlines.length > 1 ? "s" : ""
+    }.`;
     if (cheapKwh > 1e-6) {
       reason += ` +${cheapKwh.toFixed(1)} kWh opportunistic (below €${cheapPriceThresholdPerKwh?.toFixed(3)}/kWh).`;
     }
@@ -283,5 +291,6 @@ export function computePlan(input: EngineInput): PlanResult {
     feedInTariffPerKwh: input.feedInTariffPerKwh,
     maxSoc: input.maxSoc,
     cheapPriceThresholdPerKwh: input.cheapPriceThresholdPerKwh,
+    slotHours: input.slotHours,
   });
 }

@@ -16,6 +16,20 @@ export function addHours(d: Date, h: number): Date {
   return new Date(d.getTime() + h * 3600_000);
 }
 
+/** Pricing/engine grid: EnergyZero's day-ahead market publishes quarter-hour prices. */
+export const SLOT_MINUTES = 15;
+
+export function floorToSlot(d: Date): Date {
+  const t = new Date(d);
+  const m = t.getUTCMinutes();
+  t.setUTCMinutes(m - (m % SLOT_MINUTES), 0, 0);
+  return t;
+}
+
+export function addMinutes(d: Date, m: number): Date {
+  return new Date(d.getTime() + m * 60_000);
+}
+
 /** Local calendar date (YYYY-MM-DD) for a UTC instant, in the given tz. */
 export function localDateISO(d: Date, tz: string): string {
   return DateTime.fromJSDate(d, { zone: tz }).toFormat("yyyy-MM-dd");
@@ -24,6 +38,11 @@ export function localDateISO(d: Date, tz: string): string {
 /** Hour-of-day (0..23) in local tz for a UTC instant. */
 export function localHour(d: Date, tz: string): number {
   return DateTime.fromJSDate(d, { zone: tz }).hour;
+}
+
+/** Minute-of-hour (0..59) in local tz for a UTC instant. */
+export function localMinute(d: Date, tz: string): number {
+  return DateTime.fromJSDate(d, { zone: tz }).minute;
 }
 
 /** Day-of-week with 0=Monday..6=Sunday, in local tz. */

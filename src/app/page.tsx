@@ -29,7 +29,12 @@ export default async function DashboardPage() {
   ]);
   const tz = data?.tz ?? settings?.timezone ?? "Europe/Amsterdam";
 
-  const charging = plan?.charging ?? false;
+  // The plan's own decision, plus what the charger itself is reporting — the two can
+  // diverge (a manual start, a session this app didn't schedule), and the tile should
+  // reflect reality, not just intent.
+  const planned = plan?.charging ?? false;
+  const reportedByCharger = plan?.chargerReportedCharging ?? false;
+  const charging = planned || reportedByCharger;
   const feasible = plan?.feasible ?? true;
 
   return (
@@ -54,7 +59,13 @@ export default async function DashboardPage() {
           label="Charger right now"
           value={charging ? "Charging" : "Idle"}
           valueColor={charging ? "var(--color-charge)" : undefined}
-          caption={plan?.targetSoc ? `Target ${plan.targetSoc}%` : "No active target"}
+          caption={
+            charging && !planned
+              ? "Charging outside the plan (reported by charger)"
+              : plan?.targetSoc
+                ? `Target ${plan.targetSoc}%`
+                : "No active target"
+          }
         />
         <StatTile
           icon="🔋"

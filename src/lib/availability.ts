@@ -68,3 +68,35 @@ export function statusForHour(
   }
   return "AWAY";
 }
+
+/**
+ * A physically connected car means you're clearly home, whatever the schedule says.
+ *
+ * Opens up the entire away stretch the car is currently sitting in — from `nowHour`
+ * until the schedule next says home — rather than only the current bucket. Charging
+ * needs a *run* of eligible buckets to be planned across: handed one at a time the
+ * engine can't compare an away evening's prices and pick the cheapest, nor see that a
+ * deadline is reachable at all.
+ *
+ * Scoped to the current run, so a later away block (a trip next week) stays away. And
+ * it must be re-derived on every recompute/render (never persisted), so unplugging
+ * hands control back to the schedule immediately — see callers in plan.ts and
+ * timeline.ts.
+ *
+ * Mutates `availability` to "HOME" in place and returns the set of hourStart instants
+ * (ms) it forced, so a caller can distinguish "scheduled home" from "forced home" —
+ * e.g. to render it differently on the dashboard.
+ */
+export function applyChargerConnectedOverride<T extends { hourStart: Date; availability: AvailStatus }>(
+  hours: T[],
+  nowHour: Date
+): Set<number> {
+  const forced = new Set<number>();
+  for (const hour of hours) {
+    if (hour.hourStart.getTime() < nowHour.getTime()) continue;
+    if (hour.availability === "HOME") break; // schedule agrees from here on
+    hour.availability = "HOME";
+    forced.add(hour.hourStart.getTime());
+  }
+  return forced;
+}

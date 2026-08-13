@@ -26,10 +26,10 @@ export function __resetPriceBackfillCache(): void {
   emptyHistoricalDays.clear();
 }
 
-/** Have we already stored every hour of this local day? (DST-aware: 23/24/25 hours.) */
+/** Have we already stored every 15-min slot of this local day? (DST-aware: 92/96/100.) */
 async function isPriceDayComplete(dateISO: string, tz: string): Promise<boolean> {
   const { start, end } = localDayBoundsUTC(dateISO, tz);
-  const expected = Math.round((end.getTime() - start.getTime()) / 3_600_000);
+  const expected = Math.round((end.getTime() - start.getTime()) / 900_000);
   const stored = await prisma.priceSnapshot.count({
     where: { hourStart: { gte: start, lt: end } },
   });
@@ -199,6 +199,13 @@ const CONNECTED_STATES = new Set([
 const DISCONNECTED_STATES = new Set(["off", "false", "disconnected", "not_connected"]);
 
 /**
+ * States meaning an active charging session, a strict subset of CONNECTED_STATES.
+ * "connected_requesting"/"connected_finished" mean plugged in but not drawing power —
+ * only these mean current is actually flowing right now.
+ */
+const ACTIVELY_CHARGING_STATES = new Set(["charging", "connected_charging"]);
+
+/**
  * Interpret a charger entity's state as "is a car plugged in".
  *
  * Returns null when the entity can't answer — `unknown`/`unavailable`, or a value we
@@ -219,6 +226,20 @@ export function interpretConnectedState(state: string | undefined | null): boole
 }
 
 /**
+ * Interpret a charger entity's state as "is current actually flowing right now" —
+ * finer-grained than interpretConnectedState(), only meaningful for a charger-mode
+ * sensor (a plain binary_sensor can't distinguish "connected" from "charging").
+ * Returns false (not null) for any state that isn't a recognised charging state,
+ * including "unreadable" — display-only, so there's no override-cancelling risk in
+ * defaulting to "not actively charging" the way interpretConnectedState defaults to
+ * null/keep-last for the away-schedule override.
+ */
+export function interpretActivelyCharging(state: string | undefined | null): boolean {
+  const value = (state ?? "").trim().toLowerCase();
+  return ACTIVELY_CHARGING_STATES.has(value);
+}
+
+/**
  * Read the configured charger-connected entity via HA and store the latest known
  * state on PlanState. recomputePlan() reads that stored value (not a live HA call)
  * to treat away hours as home while a car is physically connected — see plan.ts.
@@ -236,7 +257,10 @@ export async function refreshChargerConnected(): Promise<RefreshResult["chargerC
     if (!entity) return { ok: true, count: 0 };
     const connected = interpretConnectedState(entity.state);
     if (connected === null) return { ok: true, count: 0 }; // unreadable — keep the last value
-    await prisma.planState.update({ where: { id: 1 }, data: { chargerConnected: connected } });
+    await prisma.planState.update({
+      where: { id: 1 },
+      data: { chargerConnected: connected, chargerReportedCharging: interpretActivelyCharging(entity.state) },
+    });
     return { ok: true, count: 1 };
   } catch (e) {
     return { ok: false, count: 0, error: (e as Error).message };

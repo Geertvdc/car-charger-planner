@@ -165,6 +165,12 @@ model PlanState {
   // Latest known charger-connected state (see refreshChargerConnected()) — used to
   // force the current hour "home" even when the schedule says away.
   chargerConnected Boolean @default(false)
+  // Narrower than chargerConnected: true only when the connected-entity's raw state
+  // itself reports an active charging session (e.g. Zaptec charger_mode
+  // "connected_charging"), not merely "cable plugged in". Display only — lets the
+  // dashboard show charging that's really happening even when this app's own plan
+  // didn't schedule it (a manual start, a different controller, etc).
+  chargerReportedCharging Boolean @default(false)
 }
 
 model ChargeLog {

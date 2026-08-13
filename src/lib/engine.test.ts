@@ -219,4 +219,30 @@ describe("computePlan", () => {
     expect(r.energyNeededKwh).toBe(0);
     expect(r.slots.every((s) => !s.on)).toBe(true);
   });
+
+  it("scales energy/cost to a 15-min slotHours instead of a full hour", () => {
+    // Same 10 kW charger, but each bucket is a 15-min slot: full-power cap per slot
+    // is 2.5 kWh (10 kW * 0.25 h), not 10 kWh. Still picks the cheapest slots first.
+    const hours: EngineHour[] = [
+      hour("2026-01-01T20:00:00Z", 0.5),
+      hour("2026-01-01T20:15:00Z", 0.1), // cheapest
+      hour("2026-01-01T20:30:00Z", 0.2),
+      hour("2026-01-01T20:45:00Z", 0.5),
+    ];
+    const r = computePlan({
+      ...base,
+      currentSoc: 50,
+      targetSoc: 54, // need 2.4 kWh into battery, less than one full slot (2.5 kWh)
+      horizonEnd: H("2026-01-01T21:00:00Z"),
+      hours,
+      slotHours: 0.25,
+    });
+    expect(r.feasible).toBe(true);
+    const on = r.slots.filter((s) => s.on);
+    expect(on).toHaveLength(1);
+    expect(on[0].hourStart.toISOString()).toBe("2026-01-01T20:15:00.000Z"); // cheapest slot
+    expect(on[0].kwh).toBeCloseTo(2.4, 5);
+    expect(on[0].cost).toBeCloseTo(2.4 * 0.1, 5);
+    expect(r.scheduledKwh).toBeCloseTo(2.4, 5);
+  });
 });

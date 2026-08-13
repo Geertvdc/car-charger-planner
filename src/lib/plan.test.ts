@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./db", () => ({ prisma: {} }));
 
-import { applyChargerConnectedOverride } from "./plan";
+import { applyChargerConnectedOverride } from "./availability";
 import type { EngineHour } from "./engine";
 import type { AvailStatus } from "./availability";
 

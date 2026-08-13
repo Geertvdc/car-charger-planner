@@ -6,7 +6,9 @@ import type { AvailStatus } from "@/lib/availability";
 import type { TimelineData, TimelineDay, TimelineHour } from "@/lib/timeline";
 import { useAppUrl } from "./BasePathProvider";
 
-const COL = 30; // px per hour
+const SLOT_MINUTES = 15;
+const SLOT_MS = SLOT_MINUTES * 60_000;
+const COL = 10; // px per 15-min slot (an hour spans 4 columns)
 const PAD_X = 10;
 const PRICE_TOP = 12;
 const PRICE_H = 140;
@@ -39,7 +41,11 @@ function barFill(ratio: number): string {
   return "url(#gradExpensive)";
 }
 
-function availFill(status: string): string {
+function availFill(status: AvailStatus, forced: boolean): string {
+  // Amber: home only because the charger's plugged in right now, not per the schedule
+  // (see TimelineHour.forcedHome / applyChargerConnectedOverride) — unplugging drops
+  // this back to the schedule's own away color on the next refresh.
+  if (forced) return "rgba(255,201,77,0.35)";
   return status === "HOME" ? "rgba(94,200,255,0.32)" : "transparent";
 }
 
@@ -184,12 +190,22 @@ function DayChart({
     if (!dragging) setTarget({ deadlineTime: day.deadlineTime, targetSoc: day.targetSoc });
   }, [day.deadlineTime, day.targetSoc, dragging]);
 
-  // --- Editable per-hour availability ---
-  const [avail, setAvail] = useState<AvailStatus[]>(() => day.hours.map((h) => h.availability));
+  // --- Editable per-hour availability (coarser than the 15-min price/charge grid:
+  // home/away windows are still hour-granularity — see buildWindows in the day/override
+  // API route). Every 4th slot marks the start of an hour.
+  const hoursPerDay = Math.round(day.hours.length / 4);
+  const [avail, setAvail] = useState<AvailStatus[]>(() =>
+    day.hours.filter((_, i) => i % 4 === 0).map((h) => h.availability)
+  );
   useEffect(() => {
-    setAvail(day.hours.map((h) => h.availability));
+    setAvail(day.hours.filter((_, i) => i % 4 === 0).map((h) => h.availability));
   }, [day.hours]);
-  const availAt = (i: number): AvailStatus => (editable ? avail[i] ?? "AWAY" : day.hours[i].availability);
+  const availAt = (hourIdx: number): AvailStatus =>
+    editable ? avail[hourIdx] ?? "AWAY" : day.hours[hourIdx * 4]?.availability ?? "AWAY";
+  // Live signal, not part of the editable draft — always read straight from the
+  // server data so it tracks the charger's actual connected state.
+  const forcedHomeAt = (hourIdx: number): boolean =>
+    day.hours.slice(hourIdx * 4, hourIdx * 4 + 4).some((h) => h.forcedHome);
 
   const svgPoint = (clientX: number, clientY: number) => {
     const rect = svgRef.current!.getBoundingClientRect();
@@ -199,18 +215,12 @@ function DayChart({
     };
   };
 
-  // x-position -> "HH:MM" snapped to 15 min, using each column's local hour.
+  // x-position -> "HH:MM" of the 15-min column under the cursor (each column IS a slot).
   const timeFromX = (x: number): string => {
     const raw = (x - PAD_X) / COL;
     const idx = Math.max(0, Math.min(day.hours.length - 1, Math.floor(raw)));
-    const frac = Math.max(0, Math.min(0.999, raw - idx));
-    let hour = day.hours[idx].localHour;
-    let minute = Math.round((frac * 60) / 15) * 15;
-    if (minute >= 60) {
-      minute = 0;
-      hour = Math.min(23, hour + 1);
-    }
-    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    const h = day.hours[idx];
+    return `${String(h.localHour).padStart(2, "0")}:${String(h.localMinute).padStart(2, "0")}`;
   };
 
   const onHandleDown = (e: React.PointerEvent) => {
@@ -229,11 +239,13 @@ function DayChart({
     onSaveTarget(target.deadlineTime, target.targetSoc);
   };
 
-  const toggleHour = (i: number) => {
+  const toggleHour = (hourIdx: number) => {
     const next = avail.slice();
-    next[i] = NEXT_STATUS[next[i] ?? "AWAY"];
+    next[hourIdx] = NEXT_STATUS[next[hourIdx] ?? "AWAY"];
     setAvail(next);
-    onSaveAvailability(day.hours.map((h, idx) => ({ hour: h.localHour, status: next[idx] ?? "AWAY" })));
+    onSaveAvailability(
+      next.map((status, idx) => ({ hour: day.hours[idx * 4]?.localHour ?? idx, status }))
+    );
   };
 
   // Solar area path
@@ -264,11 +276,11 @@ function DayChart({
   };
 
   // For an editable day, position the deadline from the (possibly dragged) local time.
+  // day.hours[0] is always local midnight, so total minutes / slot size gives a
+  // continuous column offset (fractional when hhmm isn't on a 15-min boundary).
   const deadlineXFromTime = (hhmm: string): number => {
     const [h, m] = hhmm.split(":").map(Number);
-    const idx = day.hours.findIndex((hr) => hr.localHour === h);
-    const base = idx >= 0 ? idx : h;
-    return xFor(base) + (m / 60) * COL;
+    return xFor((h * 60 + m) / SLOT_MINUTES);
   };
   const deadlineX = editable ? deadlineXFromTime(target.deadlineTime) : markerX(day.deadlineHour);
   const targetY = socY(target.targetSoc);
@@ -276,8 +288,8 @@ function DayChart({
   let nowX: number | null = null;
   for (let i = 0; i < day.hours.length; i++) {
     const hs = new Date(day.hours[i].hourStart).getTime();
-    if (hs <= nowMs && nowMs < hs + 3600_000) {
-      nowX = xFor(i) + ((nowMs - hs) / 3600_000) * COL;
+    if (hs <= nowMs && nowMs < hs + SLOT_MS) {
+      nowX = xFor(i) + ((nowMs - hs) / SLOT_MS) * COL;
       break;
     }
   }
@@ -314,15 +326,15 @@ function DayChart({
           stroke="rgba(255,255,255,0.05)"
         />
 
-        {/* availability band background */}
-        {day.hours.map((h, i) => (
+        {/* availability band background — hour-granularity, one block per 4 slot columns */}
+        {Array.from({ length: hoursPerDay }, (_, hourIdx) => (
           <rect
-            key={`av-${i}`}
-            x={xFor(i)}
+            key={`av-${hourIdx}`}
+            x={xFor(hourIdx * 4)}
             y={AVAIL_Y}
-            width={COL}
+            width={COL * 4}
             height={AVAIL_H}
-            fill={availFill(availAt(i))}
+            fill={availFill(availAt(hourIdx), forcedHomeAt(hourIdx))}
           />
         ))}
 
@@ -334,11 +346,11 @@ function DayChart({
           return (
             <rect
               key={`p-${i}`}
-              x={xFor(i) + 2}
+              x={xFor(i) + 1}
               y={PRICE_BOTTOM - barH}
-              width={COL - 4}
+              width={COL - 2}
               height={barH}
-              rx={3}
+              rx={1.5}
               fill={barFill(ratio)}
               opacity={h.isPast ? 0.42 : 0.92}
             />
@@ -400,7 +412,7 @@ function DayChart({
               onMouseEnter={() => onHover(h)}
               onMouseLeave={() => onHover(null)}
             />
-            {h.localHour % 6 === 0 && (
+            {h.localMinute === 0 && h.localHour % 6 === 0 && (
               <text
                 x={xFor(i) + COL / 2}
                 y={LABEL_Y}
@@ -420,20 +432,20 @@ function DayChart({
             metadata, which mismatches on hydration inside SVG. Hover forwards to the
             detail bar instead. */}
         {editable &&
-          day.hours.map((h, i) => (
+          Array.from({ length: hoursPerDay }, (_, hourIdx) => (
             <rect
-              key={`edit-${i}`}
-              x={xFor(i) + 0.5}
+              key={`edit-${hourIdx}`}
+              x={xFor(hourIdx * 4) + 0.5}
               y={AVAIL_Y}
-              width={COL - 1}
+              width={COL * 4 - 1}
               height={AVAIL_H}
               rx={3}
-              fill={availFill(availAt(i))}
+              fill={availFill(availAt(hourIdx), forcedHomeAt(hourIdx))}
               stroke="rgba(94,200,255,0.5)"
               strokeWidth={0.5}
               style={{ cursor: "pointer" }}
-              onClick={() => toggleHour(i)}
-              onMouseEnter={() => onHover(h)}
+              onClick={() => toggleHour(hourIdx)}
+              onMouseEnter={() => onHover(day.hours[hourIdx * 4])}
               onMouseLeave={() => onHover(null)}
             />
           ))}
@@ -532,6 +544,7 @@ function Legend() {
     ["var(--color-charge)", "charging (target)"],
     ["var(--color-charge-cheap)", "charging (cheap)"],
     ["rgba(94,200,255,0.32)", "home"],
+    ["rgba(255,201,77,0.35)", "home (plugged in)"],
   ];
   return (
     <div className="flex flex-wrap gap-4 text-[11px] text-[var(--color-muted)]">
@@ -555,9 +568,11 @@ function HoverInfo({ hover }: { hover: { h: TimelineHour; day: string } | null }
   const { h, day } = hover;
   return (
     <div className="mt-2 h-5 font-mono text-xs text-[var(--color-text)]">
-      <span className="font-sans text-[var(--color-muted)]">{day}</span> {String(h.localHour).padStart(2, "0")}:00 ·{" "}
+      <span className="font-sans text-[var(--color-muted)]">{day}</span>{" "}
+      {String(h.localHour).padStart(2, "0")}:{String(h.localMinute).padStart(2, "0")} ·{" "}
       {h.allInPrice != null ? `€${h.allInPrice.toFixed(3)}/kWh` : "no price"} · ☀ {(h.solarWh / 1000).toFixed(2)} kWh ·{" "}
       {h.availability.toLowerCase()}
+      {h.forcedHome ? " (plugged in)" : ""}
       {h.planned
         ? ` · charging ${h.plannedKwh.toFixed(1)} kWh (${h.plannedReason === "cheap" ? "cheap" : "target"})`
         : ""}
