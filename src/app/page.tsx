@@ -31,10 +31,14 @@ export default async function DashboardPage() {
 
   // The plan's own decision, plus what the charger itself is reporting — the two can
   // diverge (a manual start, a session this app didn't schedule), and the tile should
-  // reflect reality, not just intent.
+  // reflect reality, not just intent. When connection tracking is configured, "planned"
+  // alone isn't enough to call it "charging" — the plan can schedule a home window
+  // without the car actually being plugged in, so require a confirmed connection too.
+  const chargerConnectedTracked = !!settings?.haChargerConnectedEntityId?.trim();
   const planned = plan?.charging ?? false;
   const reportedByCharger = plan?.chargerReportedCharging ?? false;
-  const charging = planned || reportedByCharger;
+  const plannedButUnconnected = planned && chargerConnectedTracked && !plan?.chargerConnected;
+  const charging = reportedByCharger || (planned && !plannedButUnconnected);
   const feasible = plan?.feasible ?? true;
 
   return (
@@ -62,9 +66,11 @@ export default async function DashboardPage() {
           caption={
             charging && !planned
               ? "Charging outside the plan (reported by charger)"
-              : plan?.targetSoc
-                ? `Target ${plan.targetSoc}%`
-                : "No active target"
+              : plannedButUnconnected
+                ? "Plan wants to charge, but the car isn't connected"
+                : plan?.targetSoc
+                  ? `Target ${plan.targetSoc}%`
+                  : "No active target"
           }
         />
         <StatTile
