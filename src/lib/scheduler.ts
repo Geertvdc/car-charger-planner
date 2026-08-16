@@ -7,16 +7,18 @@ const g = globalThis as unknown as {
 };
 
 const REFRESH_MS = 30 * 60 * 1000; // full data refresh + recompute every 30 min
-const RECOMPUTE_MS = 5 * 60 * 1000; // advance the plan "now" pointer every 5 min
+const RECOMPUTE_MS = 60 * 1000; // advance the plan "now" pointer every 1 min
 
 /**
  * Background schedule using plain intervals (no external cron dep, bundles cleanly).
  * Idempotent — safe to call from the Next.js instrumentation hook and/or a worker.
  *
  * A 30-min refresh comfortably covers: tomorrow's prices (published ~13:00 and picked
- * up on the next tick) and periodic solar updates. The engine now plans in 15-min
- * slots, so recompute runs every 5 min (3x/slot) to keep the HA on/off sync from
- * lagging behind a slot boundary by more than a third of it.
+ * up on the next tick) and periodic solar updates. The engine plans in 15-min slots;
+ * recompute runs every 1 min (15x/slot) both to keep the HA on/off sync tight to a
+ * slot boundary and, more importantly, to pick up a charger-plugged-in event quickly —
+ * this is a cheap local HA REST call, not a rate-limited cloud API, so a short interval
+ * costs nothing.
  */
 export function startScheduler(): void {
   if (g.__chargerSchedulerStarted) return;
@@ -32,7 +34,7 @@ export function startScheduler(): void {
       () =>
         run("recompute", async () => {
           // Background-only HA read (not in the interactive recomputePlan() path) so
-          // "charger connected" stays fresh within ~10 min without adding a live HA
+          // "charger connected" stays fresh within ~1 min without adding a live HA
           // round-trip to every settings save / timeline edit.
           await refreshChargerConnected().catch(() => undefined);
           return recomputePlan();

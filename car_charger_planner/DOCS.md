@@ -42,7 +42,7 @@ Optional entity hookups, all read-only:
 
 ## How it decides
 
-Prices and the solar forecast refresh every 30 minutes; the plan advances every 10.
+Prices and the solar forecast refresh every 30 minutes; the plan advances every minute.
 Each hour is scored on its effective cost — grid price, less the value of solar that
 would otherwise be exported — and the cheapest hours that can reach the target before the
 deadline are switched on. Solar is discounted by the *usable factor* on the Settings page,

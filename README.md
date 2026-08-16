@@ -262,7 +262,7 @@ stopped because current was set to 0A, the car hit its target SoC, or the car's 
 schedule paused it.
 
 This requires HA to be reachable from wherever the app runs, and the token to have
-access to the charger entity. Every time the plan is recomputed (on the ~10 min
+access to the charger entity. Every time the plan is recomputed (on the ~1 min
 scheduler tick, or any settings/schedule change), the app compares the desired on/off
 state to the last state it successfully pushed and calls HA only on a change — so it
 won't spam `turn_on`/`turn_off` on every tick. If a push fails (HA unreachable, bad
@@ -312,7 +312,7 @@ Do **not** point this at `binary_sensor.<charger>_charger` on the Zaptec integra
 is `device_class: connectivity`, meaning the charger is online, and reads `on`
 permanently — which would cancel your away schedule outright. An `unknown` or
 `unavailable` reading leaves the last known value in place, so a momentary Home Assistant
-blip can't drop the override mid-session. Checked in the background roughly every 10 minutes (and on every manual
+blip can't drop the override mid-session. Checked in the background roughly every minute (and on every manual
 **Refresh data & plan**), not on every interactive save, so it never adds a live HA
 round-trip to actions like dragging the target slider.
 
@@ -376,7 +376,7 @@ src/
     refresh.ts           Pulls fresh data: EPEX prices, solar forecast, HA power/SoC/
                           charger-connected sensors
     scheduler.ts         In-process interval loop: refresh every 30 min, advance/
-                          recompute the plan every 10 min
+                          recompute the plan every 1 min
     ha-client.ts          Low-level HA REST client (get entity state, call a service)
     ha-control.ts         syncChargerState() — diffs desired vs. last-pushed state,
                            calls HA only on change, records PlanState.haSync*

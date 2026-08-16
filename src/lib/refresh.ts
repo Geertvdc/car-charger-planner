@@ -245,7 +245,7 @@ export function interpretActivelyCharging(state: string | undefined | null): boo
  * to treat away hours as home while a car is physically connected — see plan.ts.
  * Called from refreshAll() (30 min + manual refresh) and, more frequently, from the
  * scheduler's background recompute tick (src/lib/scheduler.ts) so the override reacts
- * within ~10 min without adding a live HA round-trip to every interactive
+ * within ~1 min without adding a live HA round-trip to every interactive
  * recomputePlan() call (settings saves, timeline edits, etc.).
  */
 export async function refreshChargerConnected(): Promise<RefreshResult["chargerConnected"]> {
