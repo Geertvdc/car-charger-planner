@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- The "Charger right now" tile no longer shows "Charging" for a planned home-window
+  slot when connection tracking says the car isn't actually plugged in.
+- The background check for "is a car plugged in" now runs every ~1 minute instead of
+  every ~5, so the away-schedule override reacts to a plug-in event much faster.
+
 ## 0.2.0
 
 - Prices and the charging engine now run on 15-minute slots, matching the day-ahead
