@@ -20,6 +20,7 @@ export interface TimelineHour {
   localHour: number;
   localMinute: number; // 0 | 15 | 30 | 45
   allInPrice: number | null;
+  feedInPrice: number | null; // what exporting this slot pays; always below allInPrice
   rawPrice: number | null;
   solarWh: number;
   availability: AvailStatus;
@@ -29,8 +30,16 @@ export interface TimelineHour {
   planned: boolean;
   plannedKwh: number;
   plannedSource: string | null;
-  plannedReason: string | null; // target | cheap
-  actual: boolean | null;
+  plannedReason: string | null; // target | cheap | surplus
+  plannedAmps: number;
+  // Measured averages over this slot, from PowerReading. Past slots only.
+  // gridWatts is POSITIVE when importing, negative when exporting to the grid.
+  gridWatts: number | null;
+  pvWatts: number | null;
+  // Export the forecast expects this slot, in watts — the future-facing counterpart to a
+  // negative gridWatts. Same quantity the engine calls solarAvgKw.
+  forecastSurplusW: number;
+  actualMode: string | null; // off | plan | surplus — what actually ran
   isPast: boolean;
 }
 
@@ -70,7 +79,7 @@ export async function buildTimeline(nowOverride?: Date): Promise<TimelineData> {
   const rangeStart = localDayStartUTC(startISO, tz);
   const rangeEnd = localDayStartUTC(endISO, tz);
 
-  const [prices, solar, slots, logs, planState] = await Promise.all([
+  const [prices, solar, slots, logs, planState, power] = await Promise.all([
     prisma.priceSnapshot.findMany({
       where: { hourStart: { gte: rangeStart, lt: rangeEnd } },
     }),
@@ -85,17 +94,37 @@ export async function buildTimeline(nowOverride?: Date): Promise<TimelineData> {
       orderBy: { at: "asc" },
     }),
     prisma.planState.findUnique({ where: { id: 1 } }),
+    prisma.powerReading.findMany({
+      where: { at: { gte: rangeStart, lt: rangeEnd } },
+      orderBy: { at: "asc" },
+    }),
   ]);
 
   const priceMap = new Map(prices.map((p) => [p.hourStart.getTime(), p]));
   const solarMap = new Map(solar.map((s) => [s.hourStart.getTime(), s.expectedWh]));
   const slotMap = new Map(slots.map((s) => [s.hourStart.getTime(), s]));
 
-  // Actual charge state as a step function from the logs.
-  const actualAt = (t: Date): boolean | null => {
-    let state: boolean | null = null;
+  // Average the 30-second power samples into the chart's 15-minute grid. Averaging (not
+  // sampling) is what makes the trace readable: a slot holds ~30 readings and the point
+  // is the slot's overall import/export balance, not whichever instant we happened to
+  // land on.
+  const powerBuckets = new Map<number, { grid: number[]; pv: number[] }>();
+  for (const r of power) {
+    const key = floorToSlot(r.at).getTime();
+    let b = powerBuckets.get(key);
+    if (!b) powerBuckets.set(key, (b = { grid: [], pv: [] }));
+    b.grid.push(r.watts);
+    if (r.pvWatts != null) b.pv.push(r.pvWatts);
+  }
+  const mean = (xs: number[]): number | null =>
+    xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
+
+  // Actual charge state as a step function from the logs. Carries the mode too, so the
+  // chart can distinguish a session that ran on solar surplus from one that ran on grid.
+  const actualAt = (t: Date): string | null => {
+    let state: string | null = null;
     for (const l of logs) {
-      if (l.at.getTime() <= t.getTime()) state = l.on;
+      if (l.at.getTime() <= t.getTime()) state = l.on ? l.mode ?? "plan" : null;
       else break;
     }
     return state;
@@ -150,20 +179,29 @@ export async function buildTimeline(nowOverride?: Date): Promise<TimelineData> {
     // Solar forecast is hourly only; split its hour's energy evenly across the four
     // 15-min slots it covers (mirrors the same split in plan.ts's engine input).
     const hourlySolarWh = solarMap.get(floorToHour(t).getTime()) ?? 0;
+    const slotSolarWh = hourlySolarWh / 4;
+    const bucket = powerBuckets.get(key);
     draft.push({
       hourStart: new Date(t),
       day,
       localHour: localHour(t, tz),
       localMinute: localMinute(t, tz),
       allInPrice: price?.allInPrice ?? null,
+      feedInPrice: price?.feedInPrice ?? null,
       rawPrice: price?.rawPrice ?? null,
-      solarWh: hourlySolarWh / 4,
+      solarWh: slotSolarWh,
       availability: statusForHour(t, dateISO, cfg.windows, tz),
       planned: slot?.on ?? false,
       plannedKwh: slot?.expectedKwh ?? 0,
       plannedSource: slot?.source ?? null,
       plannedReason: slot?.reason ?? null,
-      actual: isPast ? actualAt(t) : null,
+      plannedAmps: slot?.expectedAmps ?? 0,
+      gridWatts: bucket ? mean(bucket.grid) : null,
+      pvWatts: bucket ? mean(bucket.pv) : null,
+      // Wh in a 15-min slot -> average W is x4; houseLoadFactor is the share the house
+      // isn't already consuming, i.e. what would be exported. Mirrors engine.ts.
+      forecastSurplusW: slotSolarWh * 4 * settings.houseLoadFactor,
+      actualMode: isPast ? actualAt(t) : null,
       isPast,
     });
   }

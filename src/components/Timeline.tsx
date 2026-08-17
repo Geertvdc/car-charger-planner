@@ -41,6 +41,20 @@ function barFill(ratio: number): string {
   return "url(#gradExpensive)";
 }
 
+// Why a slot is charging, and how that reads on the chart.
+// surplus is the one to spot at a glance: it's the free energy that would otherwise have
+// been exported at a much worse price.
+const CHARGE_STYLE: Record<string, { color: string; glow: string; label: string }> = {
+  target: { color: "var(--color-charge)", glow: "rgba(255,201,77,0.6)", label: "target" },
+  cheap: { color: "var(--color-charge-cheap)", glow: "rgba(46,158,110,0.6)", label: "cheap" },
+  surplus: {
+    color: "var(--color-charge-surplus)",
+    glow: "rgba(53,208,196,0.65)",
+    label: "solar surplus",
+  },
+};
+const chargeStyle = (reason: string | null) => CHARGE_STYLE[reason ?? "target"] ?? CHARGE_STYLE.target;
+
 function availFill(status: AvailStatus, forced: boolean): string {
   // Amber: home only because the charger's plugged in right now, not per the schedule
   // (see TimelineHour.forcedHome / applyChargerConnectedOverride) — unplugging drops
@@ -64,10 +78,11 @@ export default function Timeline({ data }: { data: TimelineData }) {
     }
   }, []);
 
-  const { maxPrice, minPrice, maxSolar } = useMemo(() => {
+  const { maxPrice, minPrice, maxSolar, maxGridW } = useMemo(() => {
     let maxP = 0.0001,
       minP = Infinity,
-      maxS = 1;
+      maxS = 1,
+      maxG = 0;
     for (const d of data.days)
       for (const h of d.hours) {
         if (h.allInPrice != null) {
@@ -75,9 +90,13 @@ export default function Timeline({ data }: { data: TimelineData }) {
           minP = Math.min(minP, h.allInPrice);
         }
         maxS = Math.max(maxS, h.solarWh);
+        // One shared symmetric scale across every day, so a dip below the zero line
+        // means the same amount of export wherever you look.
+        if (h.gridWatts != null) maxG = Math.max(maxG, Math.abs(h.gridWatts));
+        maxG = Math.max(maxG, h.forecastSurplusW);
       }
     if (!isFinite(minP)) minP = 0;
-    return { maxPrice: maxP, minPrice: minP, maxSolar: maxS };
+    return { maxPrice: maxP, minPrice: minP, maxSolar: maxS, maxGridW: Math.max(500, maxG) };
   }, [data]);
 
   const nowMs = new Date(data.now).getTime();
@@ -135,6 +154,7 @@ export default function Timeline({ data }: { data: TimelineData }) {
                 maxPrice={maxPrice}
                 minPrice={minPrice}
                 maxSolar={maxSolar}
+                maxGridW={maxGridW}
                 nowMs={nowMs}
                 editable={day.isToday || day.isFuture}
                 onHover={(h) => setHover(h ? { h, day: day.label } : null)}
@@ -159,6 +179,7 @@ function DayChart({
   maxPrice,
   minPrice,
   maxSolar,
+  maxGridW,
   nowMs,
   editable,
   onHover,
@@ -169,6 +190,7 @@ function DayChart({
   maxPrice: number;
   minPrice: number;
   maxSolar: number;
+  maxGridW: number;
   nowMs: number;
   editable: boolean;
   onHover: (h: TimelineHour | null) => void;
@@ -260,6 +282,39 @@ function DayChart({
           xFor(day.hours.length - 1) + COL / 2
         },${PRICE_BOTTOM} Z`
       : "";
+
+  // --- Net grid power trace ---
+  // Zero sits below the middle of the price panel so exports have room to swing down
+  // without the trace colliding with the tall price bars at the top.
+  const GRID_ZERO_Y = PRICE_TOP + PRICE_H * 0.55;
+  const GRID_SPAN = PRICE_H * 0.4;
+  const gridY = (w: number) =>
+    GRID_ZERO_Y - Math.max(-1, Math.min(1, w / maxGridW)) * GRID_SPAN;
+  const clipId = `exportclip-${day.dateISO}`;
+
+  // Measured where we have samples, forecast beyond that. Forecast export is negative
+  // because exporting is negative grid power.
+  const gridPts = day.hours.map((h, i) => ({
+    x: xFor(i) + COL / 2,
+    w: h.gridWatts ?? (h.isPast ? null : -h.forecastSurplusW),
+    measured: h.gridWatts != null,
+  }));
+  const runToPath = (pts: { x: number; w: number | null }[]) => {
+    const seg = pts.filter((p) => p.w != null) as { x: number; w: number }[];
+    if (seg.length < 2) return "";
+    return `M ${seg.map((p) => `${p.x},${gridY(p.w)}`).join(" L ")}`;
+  };
+  const gridPast = runToPath(gridPts.map((p) => ({ ...p, w: p.measured ? p.w : null })));
+  const gridFuture = runToPath(gridPts.map((p) => ({ ...p, w: p.measured ? null : p.w })));
+  const gridDefined = gridPts.filter((p) => p.w != null) as { x: number; w: number }[];
+  const hasGridTrace = gridDefined.length >= 2;
+  // Filled band between the trace and zero, clipped to below the zero line so only the
+  // exporting part is shaded.
+  const gridArea = hasGridTrace
+    ? `M ${gridDefined[0].x},${GRID_ZERO_Y} L ${gridDefined
+        .map((p) => `${p.x},${gridY(p.w)}`)
+        .join(" L ")} L ${gridDefined[gridDefined.length - 1].x},${GRID_ZERO_Y} Z`
+    : "";
 
   // Deadline + now marker positions (fraction of the day by local hour)
   const markerX = (iso: string | null): number | null => {
@@ -362,13 +417,51 @@ function DayChart({
           <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="var(--color-solar)" strokeWidth={1.5} />
         )}
 
+        {/* net grid power — the direct read on "am I exporting right now". Measured
+            (solid) for slots we have samples for, forecast (dashed) ahead of now. The
+            filled area below the zero line is power going back to the grid: exactly what
+            surplus charging is meant to swallow. */}
+        <defs>
+          <clipPath id={clipId}>
+            <rect
+              x={PAD_X}
+              y={GRID_ZERO_Y}
+              width={width - PAD_X * 2}
+              height={Math.max(0, PRICE_BOTTOM - GRID_ZERO_Y)}
+            />
+          </clipPath>
+        </defs>
+        {gridArea && <path d={gridArea} fill="rgba(53,208,196,0.22)" clipPath={`url(#${clipId})`} />}
+        {gridPast && (
+          <path d={gridPast} fill="none" stroke="var(--color-export)" strokeWidth={1.3} opacity={0.85} />
+        )}
+        {gridFuture && (
+          <path
+            d={gridFuture}
+            fill="none"
+            stroke="var(--color-export)"
+            strokeWidth={1.2}
+            strokeDasharray="3 3"
+            opacity={0.55}
+          />
+        )}
+        {hasGridTrace && (
+          <line
+            x1={PAD_X}
+            y1={gridY(0)}
+            x2={width - PAD_X}
+            y2={gridY(0)}
+            stroke="rgba(255,255,255,0.18)"
+            strokeWidth={1}
+            strokeDasharray="2 4"
+          />
+        )}
+
         {/* planned charge band — amber for target charging, green for opportunistic
-            cheap-price charging (below the threshold, not needed for a target) */}
+            cheap-price charging, teal for solar surplus (see CHARGE_STYLE) */}
         {day.hours.map((h, i) => {
           if (!h.planned) return null;
-          const cheap = h.plannedReason === "cheap";
-          const color = cheap ? "var(--color-charge-cheap)" : "var(--color-charge)";
-          const glow = cheap ? "rgba(46,158,110,0.6)" : "rgba(255,201,77,0.6)";
+          const { color, glow } = chargeStyle(h.plannedReason);
           return (
             <rect
               key={`c-${i}`}
@@ -383,9 +476,9 @@ function DayChart({
             />
           );
         })}
-        {/* actual charge (history) outline */}
+        {/* actual charge (history) outline, coloured by the mode that actually ran */}
         {day.hours.map((h, i) =>
-          h.actual ? (
+          h.actualMode ? (
             <rect
               key={`a-${i}`}
               x={xFor(i) + 1}
@@ -394,7 +487,7 @@ function DayChart({
               height={CHARGE_H}
               rx={3}
               fill="none"
-              stroke="var(--color-charge)"
+              stroke={chargeStyle(h.actualMode === "surplus" ? "surplus" : "target").color}
               strokeWidth={1.5}
             />
           ) : null
@@ -543,6 +636,8 @@ function Legend() {
     ["var(--color-solar)", "solar"],
     ["var(--color-charge)", "charging (target)"],
     ["var(--color-charge-cheap)", "charging (cheap)"],
+    ["var(--color-charge-surplus)", "charging (solar surplus)"],
+    ["rgba(53,208,196,0.22)", "exporting to grid"],
     ["rgba(94,200,255,0.32)", "home"],
     ["rgba(255,201,77,0.35)", "home (plugged in)"],
   ];
@@ -566,15 +661,28 @@ function HoverInfo({ hover }: { hover: { h: TimelineHour; day: string } | null }
     return <div className="mt-2 h-5 text-xs text-[var(--color-muted)]">Hover an hour for details.</div>;
   }
   const { h, day } = hover;
+  // Both sides of the price: what a kWh costs to import, and the much lower amount the
+  // same kWh earns if it goes back to the grid instead of into the car.
+  const price =
+    h.allInPrice != null
+      ? `€${h.allInPrice.toFixed(3)}/kWh${
+          h.feedInPrice != null ? ` (export €${h.feedInPrice.toFixed(3)})` : ""
+        }`
+      : "no price";
+  const grid =
+    h.gridWatts != null
+      ? ` · ${h.gridWatts < 0 ? "exporting" : "importing"} ${Math.abs(Math.round(h.gridWatts))} W`
+      : h.forecastSurplusW > 1
+        ? ` · ~${Math.round(h.forecastSurplusW)} W export forecast`
+        : "";
   return (
     <div className="mt-2 h-5 font-mono text-xs text-[var(--color-text)]">
       <span className="font-sans text-[var(--color-muted)]">{day}</span>{" "}
-      {String(h.localHour).padStart(2, "0")}:{String(h.localMinute).padStart(2, "0")} ·{" "}
-      {h.allInPrice != null ? `€${h.allInPrice.toFixed(3)}/kWh` : "no price"} · ☀ {(h.solarWh / 1000).toFixed(2)} kWh ·{" "}
-      {h.availability.toLowerCase()}
+      {String(h.localHour).padStart(2, "0")}:{String(h.localMinute).padStart(2, "0")} · {price} · ☀{" "}
+      {(h.solarWh / 1000).toFixed(2)} kWh{grid} · {h.availability.toLowerCase()}
       {h.forcedHome ? " (plugged in)" : ""}
       {h.planned
-        ? ` · charging ${h.plannedKwh.toFixed(1)} kWh (${h.plannedReason === "cheap" ? "cheap" : "target"})`
+        ? ` · charging ${h.plannedKwh.toFixed(1)} kWh @ ${h.plannedAmps} A (${chargeStyle(h.plannedReason).label})`
         : ""}
     </div>
   );

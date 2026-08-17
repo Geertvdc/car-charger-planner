@@ -13,9 +13,18 @@ const ENV_SEEDED_FIELDS = [
   { field: "haChargerStatusEntityId", env: "HA_CHARGER_STATUS_ENTITY_ID", fallback: "" },
   { field: "haChargerConnectedEntityId", env: "HA_CHARGER_CONNECTED_ENTITY_ID", fallback: "" },
   { field: "haPowerSensorEntityId", env: "HA_POWER_SENSOR_ENTITY_ID", fallback: "" },
+  { field: "haChargerPowerEntityId", env: "HA_CHARGER_POWER_ENTITY_ID", fallback: "" },
+  { field: "haSolarPowerEntityId", env: "HA_SOLAR_POWER_ENTITY_ID", fallback: "" },
   { field: "haCarSocEntityId", env: "HA_CAR_SOC_ENTITY_ID", fallback: "" },
   { field: "haChargerOnService", env: "HA_CHARGER_ON_SERVICE", fallback: "switch.turn_on" },
   { field: "haChargerOffService", env: "HA_CHARGER_OFF_SERVICE", fallback: "switch.turn_off" },
+  { field: "haChargerCurrentEntityId", env: "HA_CHARGER_CURRENT_ENTITY_ID", fallback: "" },
+  {
+    field: "haChargerCurrentService",
+    env: "HA_CHARGER_CURRENT_SERVICE",
+    fallback: "number.set_value",
+  },
+  { field: "haChargerCurrentValueKey", env: "HA_CHARGER_CURRENT_VALUE_KEY", fallback: "value" },
 ] as const;
 
 /**

@@ -5,8 +5,10 @@ A self-hosted web app that decides **when to charge your EV at home**, optimizin
 (Forecast.Solar), while respecting **when you're actually home** and a **morning
 readiness target** (e.g. "80% by 07:00 on weekdays").
 
-It talks to **Home Assistant** over HA's REST API and pushes the charger on/off
-decision itself whenever the plan is (re)computed — no HA automation required.
+It talks to **Home Assistant** over HA's REST API and drives the charger itself — both
+the on/off decision whenever the plan is (re)computed, and the **charging current**,
+modulated to follow measured solar surplus so power you'd otherwise export at a poor
+feed-in rate goes into the car instead. No HA automation required.
 
 Install it as a **Home Assistant add-on** and it runs inside HA as a sidebar panel with
 no connection setup at all, or run it standalone with Docker. See
@@ -26,6 +28,10 @@ actual problem is small and specific:
   needs to be a schedule, not a toggle.
 - Optionally top up opportunistically when the price is simply very cheap, even without
   a deadline forcing it.
+- **Never export solar I could have stored.** Exporting pays the market price plus my
+  supplier's couple of cents; importing pays that *plus energy tax plus VAT*. Every kWh
+  I keep at home is worth ~€0.13 more than the same kWh fed back, so whenever the meter
+  says I'm exporting, that power should be going into the car.
 
 That's the whole problem. Everything in this app is built to solve exactly that, and
 nothing more.
@@ -68,9 +74,18 @@ no fixed weekly schedule), use evcc instead.
   non-goal, not a missing feature.
 - **The app is the controller, not just an advisor.** It pushes on/off decisions to HA
   directly (`switch.turn_on`/`turn_off` on a configured entity) whenever the plan is
-  recomputed, rather than only displaying a recommendation someone has to act on.
+  recomputed, and sets the charging current to track live solar surplus, rather than
+  only displaying a recommendation someone has to act on.
   See [How the plan is computed](#how-the-plan-is-computed) and
   [Home Assistant integration](#home-assistant-integration).
+- **One writer to the hardware.** The plan records what it *wants* on `PlanState`; a
+  single controller (`controller.ts`) reconciles that with the live meter and is the
+  only thing that ever calls HA. A planner and a surplus loop both grabbing at the same
+  charger switch would be far worse than a slightly stale current limit.
+- **Forecast plans, measurement controls.** The engine schedules from the Forecast.Solar
+  prediction, which is the only thing available for tomorrow. But the decision to charge
+  from surplus *right now* is made from the measured grid reading — a forecast is not
+  allowed to switch the charger on by itself.
 - **Home/away is a first-class weekly schedule, not a toggle.** A weekly template
   (per-weekday home windows + a morning deadline/target) plus per-date overrides for
   days that diverge — because a real week isn't "always home" or "always away".
@@ -78,11 +93,13 @@ no fixed weekly schedule), use evcc instead.
   upcoming deadline in the visible horizon and satisfies them in order, so a cheap
   afternoon two days out gets used ahead of an expensive night if that's genuinely
   optimal — see [engine.ts](src/lib/engine.ts).
-- **Solar valued at its real opportunity cost.** Forecast solar is treated as "free"
-  minus the feed-in tariff you'd otherwise earn by exporting it — not simply free.
-- **Read-only signals stay read-only.** Car SoC and a HomeWizard power reading can be
-  pulled from HA for display/estimation, but the only thing the app ever writes back to
-  HA is the charger on/off command.
+- **Import and export are priced separately.** Energy tax is a consumption tax and is
+  never refunded on export, so the two are not the same number. The app computes both
+  per 15-minute slot and values self-consumed solar at the export price you gave up —
+  which is what makes surplus the cheapest energy in the plan, always.
+- **Read-only signals stay read-only.** Car SoC, PV production and the grid meter are
+  pulled from HA purely as inputs; the only things the app writes back are the charger
+  on/off command and its current limit.
 - **A simulation mode that can't touch real hardware.** The dashboard can fast-forward
   "now" to test the planner at any time of day, but pushes to the real charger are
   hard-disabled whenever a simulated time is set — see
@@ -103,10 +120,16 @@ no fixed weekly schedule), use evcc instead.
   met before the deadline.
 - **Opportunistic cheap-price charging** — optionally top up below a configured
   effective cost/kWh even without a deadline forcing it, capped at a max SoC.
+- **Solar surplus charging** — follows the measured grid meter every 30 s and modulates
+  the charger current so power you'd otherwise export goes into the car instead. A
+  deadline always wins; surplus fills whatever is left up to the max SoC.
+- **Correct export pricing** — a separate feed-in price per slot (no energy tax, not
+  clamped at zero), so the ~€0.13/kWh gap between importing and exporting is visible to
+  the planner rather than assumed away.
 - **Charger-connected override** — if HA reports a car physically plugged in, the
   current hour counts as home even if the schedule says away.
 - **Direct Home Assistant control** — the app pushes charger on/off to HA via its REST
-  API whenever the plan changes.
+  API whenever the plan changes, and sets the charging current to track live surplus.
 - **Installs as a Home Assistant add-on** — sidebar panel via Ingress, authenticated
   through the Supervisor with no URL or token to configure.
 - **Simulation mode** — fast-forward "now" to test the planner at any time of day
@@ -114,10 +137,10 @@ no fixed weekly schedule), use evcc instead.
 
 ## Tech
 
-Next.js (App Router, TypeScript) · Prisma + SQLite · Tailwind v4 · Vitest. Data refresh
-and plan recompute run in-process on an interval via the Next.js instrumentation hook —
-no separate scheduler service required (though one can be split out, see
-[Architecture](#architecture)).
+Next.js (App Router, TypeScript) · Prisma + SQLite · Tailwind v4 · Vitest. Data refresh,
+plan recompute and the 30 s surplus control loop run in-process on intervals via the
+Next.js instrumentation hook — no separate scheduler service required (though one can be
+split out, see [Architecture](#architecture)).
 
 ## Run locally
 
@@ -137,8 +160,10 @@ seeded from the environment (see [.env.example](.env.example) for the full list)
 
 ```
 HA_BASE_URL, HA_ACCESS_TOKEN, HA_CHARGER_SWITCH_ENTITY_ID, HA_CHARGER_STATUS_ENTITY_ID,
-HA_CHARGER_CONNECTED_ENTITY_ID, HA_POWER_SENSOR_ENTITY_ID, HA_CAR_SOC_ENTITY_ID,
-HA_CHARGER_ON_SERVICE, HA_CHARGER_OFF_SERVICE
+HA_CHARGER_CONNECTED_ENTITY_ID, HA_POWER_SENSOR_ENTITY_ID, HA_CHARGER_POWER_ENTITY_ID,
+HA_SOLAR_POWER_ENTITY_ID, HA_CAR_SOC_ENTITY_ID, HA_CHARGER_ON_SERVICE,
+HA_CHARGER_OFF_SERVICE, HA_CHARGER_CURRENT_ENTITY_ID, HA_CHARGER_CURRENT_SERVICE,
+HA_CHARGER_CURRENT_VALUE_KEY
 ```
 
 On every boot, [`seedSettingsFromEnv()`](src/lib/bootstrap.ts) copies each value into the
@@ -207,10 +232,12 @@ docker compose up --build
 ## Configure
 
 1. **Settings** — location (type a place name, e.g. "Uden, Netherlands" — it's geocoded
-   to coordinates + timezone; manual lat/lon override available), price make-up to
-   match your dynamic contract, solar-usable factor, and Home Assistant connection (see
-   below).
-2. **Car & solar** — battery kWh, charger kW, efficiency; one PV string per roof plane.
+   to coordinates + timezone; manual lat/lon override available), import price make-up
+   and export price to match your dynamic contract, solar-usable factor, solar surplus
+   charging, and Home Assistant connection (see below).
+2. **Car & solar** — battery kWh, charger kW, efficiency, and the charger's electrical
+   limits (phases, voltage, min/max current); one PV string per roof plane. Get the PV
+   kWp right — an undersized array means no surplus slots ever get planned.
 3. **Weekly schedule** — home windows (simple home/away) + morning target % per
    weekday.
 4. **Upcoming days** — diverge from the template on specific dates (or mark "away").
@@ -252,6 +279,8 @@ Then set, in **Settings**:
   `zaptec.stop_charging` service instead of a plain switch). Check your charger's actual
   HA entities/services before relying on the default.
 - **Charger status entity ID** (optional) — a read-only sensor for display
+- **Charger current entity ID** (optional) — the current limit to modulate for solar
+  surplus charging; see [Solar surplus charging](#solar-surplus-charging-optional)
 
 For the [custom-components/zaptec](https://github.com/custom-components/zaptec)
 integration specifically: point the switch entity ID at the charger's **"Charging"**
@@ -262,19 +291,59 @@ stopped because current was set to 0A, the car hit its target SoC, or the car's 
 schedule paused it.
 
 This requires HA to be reachable from wherever the app runs, and the token to have
-access to the charger entity. Every time the plan is recomputed (on the ~1 min
-scheduler tick, or any settings/schedule change), the app compares the desired on/off
-state to the last state it successfully pushed and calls HA only on a change — so it
-won't spam `turn_on`/`turn_off` on every tick. If a push fails (HA unreachable, bad
-token, wrong entity), the error is logged and retried automatically on the next tick.
+access to the charger entity. On every controller tick the app compares the desired
+on/off state to the last state it successfully pushed and calls HA only on a change — so
+it won't spam `turn_on`/`turn_off`. On/off pushes are additionally rate-limited to one
+per minute, and current pushes to one per 5 minutes (see
+[Solar surplus charging](#solar-surplus-charging-optional)). If a push fails (HA
+unreachable, bad token, wrong entity), the error is logged and retried automatically on
+the next tick, since the last-pushed marker is only updated on success.
 
-### Power meter (optional, read-only)
+### Solar surplus charging (optional)
 
-Set **Power sensor entity ID** to a HomeWizard power entity (e.g. a P1 meter's active
-power sensor) exposed via HA. It's read on the regular ~30 min data refresh (or when you
-hit **Refresh data & plan**), stored as a `PowerReading`, and shown on the dashboard.
-This is display-only — the planning engine still schedules from the Forecast.Solar
-prediction, not live readings.
+Diverts power you'd otherwise export into the car by modulating the charger current,
+following the **measured** grid meter rather than a forecast. Enable it under
+**Settings → Solar surplus charging** and set three entities:
+
+- **Grid meter entity ID** — must read **positive when importing**, negative when
+  exporting (e.g. a HomeWizard P1 meter's active power sensor).
+- **Charger power entity ID** — what the car is drawing, in watts. **Required.** The
+  grid reading already includes the car, so the controller adds it back out to find the
+  household's true surplus. Without it the loop would read its own draw as household
+  demand and throttle itself to nothing.
+- **Charger current entity ID** — the current limit to write, e.g.
+  `number.<charger>_charger_max_current` on a Zaptec. The value is sent as
+  `{entity_id, <value key>: amps}` via a configurable service (default
+  `number.set_value`), so an integration with a different payload shape works too.
+
+Optionally set a **Solar production entity ID** — shown on the timeline, not used by
+the control loop.
+
+Then set the charger's electrical envelope under **Car & solar → Electrical limits**
+(phases, voltage, min/max current). This is what converts watts into amps:
+`A = W ÷ (phases × voltage)`.
+
+**How it behaves.** A sample is taken every 30 s. Each decision uses the **median** of
+the samples in the trailing 5 minutes, so a kettle or an oven can't drag the charge rate
+around. A new session waits for surplus to hold for a **start delay** (default 2 min); a
+running one rides out dips at the minimum current and only stops after a **stop delay**
+(default 10 min), because importing a few hundred watts briefly beats tearing the
+session down every time a cloud passes. A **reserve** setting keeps a chosen number of
+watts exporting as a buffer. Surplus charging runs only while the cable is connected and
+SoC is below the car's max SoC, and a deadline always overrides it — the plan runs at
+full power and the grid tops up whatever the sun doesn't cover.
+
+**The current is written to HA at most once every 5 minutes**, with a 1 A deadband.
+Vendor cloud APIs (Zaptec's included) throttle callers that change current frequently,
+and each change makes the charger renegotiate with the car. The one exception is a ramp
+to full power for a deadline, which skips the cooldown so a target slot can't sit at
+6 A because a surplus push happened seconds earlier.
+
+> **Mind the minimum.** On **3 phases at 6 A** the smallest charge a car will accept is
+> about **4.1 kW**, so surplus charging simply won't engage on a weak solar day. Single
+> phase drops that to ~1.4 kW. Zaptec's `zaptec.limit_current` service can force single
+> phase via `available_current_phase1/2/3`, but it acts on the whole *installation*
+> (every charger on it), so it isn't wired up here.
 
 ### Car SoC (optional, read-only)
 
@@ -345,7 +414,8 @@ tomorrow + the following morning), not just the next one. Deadlines are satisfie
 order; each draws on the cheapest still-available home hours in the whole span from now
 to that deadline — so a cheap afternoon the day before is used ahead of an expensive
 night. Home hours are ranked by **effective cost per kWh** (grid price for the grid part;
-forecast solar valued at the feed-in tariff). Charge banked for an earlier deadline counts
+forecast solar valued at the export price you'd have earned). Charge banked for an
+earlier deadline counts
 toward later ones (no driving between deadlines is modelled — correct current SoC on the
 dashboard). If home hours can't meet a target, the plan is flagged infeasible with the
 kWh shortfall.
@@ -356,9 +426,37 @@ solar, the planner falls back to the cheapest hours it *can* reach (often overni
 the charger reports a car physically connected (see below), the current hour counts as
 home regardless of the schedule — you're clearly there.
 
-If a `cheapPriceThreshold` is configured, any remaining headroom up to a max SoC is
-additionally filled opportunistically wherever the effective cost/kWh drops at or below
-that threshold, even without a deadline requiring it.
+Once deadlines are satisfied, two further passes fill any remaining headroom up to the
+car's max SoC, in this order:
+
+1. **Solar surplus.** Slots whose forecast PV on its own clears the charger's minimum
+   current are scheduled at whatever current the sun can carry — not full power. These
+   cost only the export revenue you gave up, which is *always* less than any grid hour
+   (see below), so this pass runs first and is not gated on the cheap-price threshold.
+   Only slots the deadline pass left untouched are candidates: a slot already charging
+   at full power is self-consuming all of its PV anyway.
+2. **Cheap price.** If a `cheapPriceThreshold` is configured, whatever headroom is left
+   is filled wherever the effective cost/kWh drops at or below that threshold.
+
+### Why surplus always wins
+
+Importing costs `(EPEX + supplier fee + energy tax) × VAT`. Exporting pays
+`(EPEX + supplier fee) × VAT` — the energy tax is a consumption tax and is never
+refunded. The difference is the energy tax plus its VAT and is **independent of the
+market price**, so with Dutch 2026 defaults every self-consumed kWh is worth a flat
+**€0.13** more than the same kWh exported:
+
+| raw EPEX | import | export | premium |
+| --- | --- | --- | --- |
+| €0.180 | €0.3736 | €0.2420 | €0.1316 |
+| €0.080 | €0.2526 | €0.1210 | €0.1316 |
+| €0.000 | €0.1558 | €0.0242 | €0.1316 |
+| −€0.050 | €0.0953 | **−€0.0363** | €0.1316 |
+
+The export price is deliberately **not** clamped at zero: when the market price goes
+negative you *pay* to export, which is exactly when soaking surplus into the car is
+worth the most. Set your own numbers under **Settings → Export (feed-in) price**; the
+page shows a worked example using whatever you save.
 
 ## Architecture
 
@@ -371,21 +469,28 @@ src/
   components/          Client-side UI (timeline, stat tiles, simulation bar, nav)
   lib/
     engine.ts           Pure scheduling algorithm: hours + deadlines + config -> PlanResult
+                          (deadline pass, then solar-surplus, then cheap-price)
+    surplus.ts           Pure live control law: power samples + plan intent -> a charge
+                          command (median filtering, start/stop hysteresis)
     plan.ts              Wires engine.ts to the DB — loads state, calls the engine,
-                          persists PlanState/ChargeSlot, syncs the decision to HA
-    refresh.ts           Pulls fresh data: EPEX prices, solar forecast, HA power/SoC/
-                          charger-connected sensors
-    scheduler.ts         In-process interval loop: refresh every 30 min, advance/
-                          recompute the plan every 1 min
+                          persists PlanState/ChargeSlot, records the plan's *intent*
+    controller.ts        The only thing that drives hardware: reconciles plan intent
+                          with the live meter via surplus.ts, persists the decision,
+                          pushes it to HA
+    refresh.ts           Pulls fresh data: EPEX prices, solar forecast, HA grid/charger/
+                          PV power, SoC, charger-connected sensors
+    scheduler.ts         In-process interval loop: refresh every 30 min, recompute the
+                          plan every 1 min, sample power + run the controller every 30 s
     ha-client.ts          Low-level HA REST client (get entity state, call a service)
-    ha-control.ts         syncChargerState() — diffs desired vs. last-pushed state,
-                           calls HA only on change, records PlanState.haSync*
+    ha-control.ts         applyChargeCommand() — diffs desired vs. last-pushed state,
+                           calls HA only on change; on/off throttled to 1/min, current
+                           to 1 per 5 min; records PlanState.haSync*/ampsSync*
     energyzero.ts         EPEX day-ahead price fetch (EnergyZero API)
     forecastsolar.ts      PV production forecast (Forecast.Solar API), per PV string
     geocode.ts             Place name -> lat/lon/timezone (Open-Meteo)
     availability.ts         Weekly template + day overrides -> home/away per hour
-    pricing.ts, time.ts, now.ts   All-in price calc, timezone-aware date helpers,
-                                   simulated-vs-real "now"
+    pricing.ts, time.ts, now.ts   Import + export price calc, timezone-aware date
+                                   helpers, simulated-vs-real "now"
   ingress/               Reverse proxy fronting `next start` so the app works behind
                           Home Assistant Ingress (rewrite.ts holds the pure URL-rewriting
                           logic; index.ts is the container entrypoint)
@@ -402,17 +507,25 @@ car_charger_planner/    Home Assistant add-on manifest (config.yaml, build.yaml,
                          installable as an add-on store
 ```
 
-**Data flow, once running:** the scheduler (`scheduler.ts`) refreshes prices/solar/HA
-sensors on an interval (`refresh.ts`) → `plan.ts` calls the pure engine (`engine.ts`)
-with the current settings, weekly/override schedule, and fetched data → the resulting
-plan is persisted (`PlanState`, `ChargeSlot`) → `ha-control.ts` pushes the on/off
-decision to Home Assistant if it changed. The same `recomputePlan()` path also runs
+**Data flow, once running:** two loops at different speeds meet at the controller.
+
+*Planning (slow).* The scheduler refreshes prices/solar/HA sensors every 30 min
+(`refresh.ts`) → `plan.ts` calls the pure engine (`engine.ts`) with the current
+settings, weekly/override schedule, and fetched data → the plan is persisted
+(`PlanState`, `ChargeSlot`) as **intent**, not as a command. This also runs
 synchronously after any settings/schedule change made in the UI, so edits take effect
 immediately rather than waiting for the next tick.
 
-The engine itself (`engine.ts`) is deliberately pure — no DB, no HA, no dates outside
-its input — which is what makes it unit-testable without any of the surrounding
-plumbing; see [engine.test.ts](src/lib/engine.test.ts).
+*Control (fast).* Every 30 s the scheduler takes one aligned power sample — grid,
+charger and PV read together — and calls `controller.ts`, which asks `surplus.ts` what
+the charger should be doing, persists the answer, and hands it to `ha-control.ts`.
+Plan intent wins whenever a deadline needs the car charged; otherwise the measured
+surplus decides.
+
+Both pure modules (`engine.ts`, `surplus.ts`) take no DB, no HA and no clock beyond
+their input, which is what makes them unit-testable without any of the surrounding
+plumbing; see [engine.test.ts](src/lib/engine.test.ts) and
+[surplus.test.ts](src/lib/surplus.test.ts).
 
 **Single-instance app.** Settings/CarConfig/PlanState are singleton rows (`id = 1`) —
 this app is built for one household, not multi-tenant use.
@@ -420,17 +533,23 @@ this app is built for one household, not multi-tenant use.
 ## Tests
 
 ```bash
-npm test      # engine, availability, refresh, and HA client/control unit tests
+npm test      # engine, surplus control, pricing, availability, refresh, HA client/control
 ```
 
 ## Notes / roadmap
 
-- Charger control is on/off; modulating amps/target-power could be added to the engine
-  and the HA push.
 - Historical prices accumulate as the app runs (EnergyZero serves today + tomorrow).
-- HomeWizard power-meter data is read via HA and shown on the dashboard but not yet
-  wired into the planning engine — the engine still schedules from the Forecast.Solar
-  prediction, not live power readings.
+- **Get your PV string sizes right.** The planner's solar forecast comes from
+  Forecast.Solar and is only as good as the kWp/tilt/azimuth you enter under
+  **Car & solar**. An undersized array means forecast surplus never clears the charger's
+  minimum current and no surplus slots get planned at all. (The live control loop is
+  immune — it uses measured power — but the plan and timeline will be wrong.)
+- **No 1/3-phase switching.** On 3 phases the 6 A floor puts the minimum charge at
+  ~4.1 kW, so surplus charging can't use a weak solar day. Dropping to single phase
+  would extend that down to ~1.4 kW; on Zaptec it means the installation-level
+  `zaptec.limit_current` service, which affects every charger on the installation.
+- The surplus loop assumes one controllable load. If something else in the house also
+  chases surplus (a heat pump, a home battery), the two will compete for the same watts.
 
 ## License
 

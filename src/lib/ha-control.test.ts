@@ -18,7 +18,26 @@ vi.mock("./ha-client", () => ({
   callHaService: (...args: unknown[]) => callHaService(...args),
 }));
 
-import { chargerControlStatus, syncChargerState } from "./ha-control";
+import { applyChargeCommand, chargerControlStatus, syncChargerState } from "./ha-control";
+import type { ChargeCommand, ChargeMode } from "./surplus";
+
+const command = (mode: ChargeMode, amps: number, on = mode !== "off"): ChargeCommand => ({
+  on,
+  amps,
+  mode,
+  reason: "",
+  availableWatts: null,
+  surplusSinceAt: null,
+  deficitSinceAt: null,
+});
+
+const CURRENT_SETTINGS = {
+  // On/off is left unconfigured in these cases so only the current push is exercised.
+  haChargerSwitchEntityId: "",
+  haChargerCurrentEntityId: "number.zaptec_go_2_charger_max_current",
+  haChargerCurrentService: "number.set_value",
+  haChargerCurrentValueKey: "value",
+};
 
 describe("syncChargerState", () => {
   beforeEach(() => {
@@ -213,6 +232,131 @@ describe("chargerControlStatus", () => {
       vi.stubEnv("ALLOW_CHARGER_CONTROL", v);
       expect(chargerControlStatus().enabled).toBe(false);
     }
+  });
+});
+
+describe("applyChargeCommand — charger current", () => {
+  beforeEach(() => {
+    settingsFindUnique.mockReset();
+    planStateFindUnique.mockReset();
+    planStateUpdate.mockReset().mockResolvedValue({});
+    callHaService.mockReset().mockResolvedValue(undefined);
+    vi.stubEnv("ALLOW_CHARGER_CONTROL", "1");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("sets the current with the configured service and payload key", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({ ampsSyncValue: null, ampsSyncAt: null });
+    await applyChargeCommand(command("surplus", 9));
+    expect(callHaService).toHaveBeenCalledWith("number", "set_value", {
+      entity_id: "number.zaptec_go_2_charger_max_current",
+      value: 9,
+    });
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { ampsSyncValue: 9, ampsSyncAt: expect.any(Date), haSyncError: null },
+    });
+  });
+
+  it("supports a service with a different payload key", async () => {
+    settingsFindUnique.mockResolvedValue({
+      ...CURRENT_SETTINGS,
+      haChargerCurrentService: "zaptec.limit_current",
+      haChargerCurrentValueKey: "available_current",
+    });
+    planStateFindUnique.mockResolvedValue({ ampsSyncValue: null, ampsSyncAt: null });
+    await applyChargeCommand(command("surplus", 12));
+    expect(callHaService).toHaveBeenCalledWith("zaptec", "limit_current", {
+      entity_id: "number.zaptec_go_2_charger_max_current",
+      available_current: 12,
+    });
+  });
+
+  it("holds the current for 5 minutes after a push — the vendor cloud throttles", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({
+      ampsSyncValue: 9,
+      ampsSyncAt: new Date(Date.now() - 60_000), // only a minute ago
+    });
+    await applyChargeCommand(command("surplus", 13));
+    expect(callHaService).not.toHaveBeenCalled();
+  });
+
+  it("pushes again once the 5-minute cooldown has passed", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({
+      ampsSyncValue: 9,
+      ampsSyncAt: new Date(Date.now() - 6 * 60_000),
+    });
+    await applyChargeCommand(command("surplus", 13));
+    expect(callHaService).toHaveBeenCalledWith("number", "set_value", {
+      entity_id: "number.zaptec_go_2_charger_max_current",
+      value: 13,
+    });
+  });
+
+  it("suppresses a push the charger's 1 A step can't represent", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({ ampsSyncValue: 9, ampsSyncAt: null });
+    await applyChargeCommand(command("surplus", 9));
+    expect(callHaService).not.toHaveBeenCalled();
+  });
+
+  it("lets a ramp to full power for the plan skip the cooldown", async () => {
+    // A deadline slot must not sit at 6 A for five minutes because a surplus push
+    // happened seconds earlier.
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({
+      ampsSyncValue: 6,
+      ampsSyncAt: new Date(Date.now() - 10_000),
+    });
+    await applyChargeCommand(command("plan", 16));
+    expect(callHaService).toHaveBeenCalledWith("number", "set_value", {
+      entity_id: "number.zaptec_go_2_charger_max_current",
+      value: 16,
+    });
+  });
+
+  it("does not let a plan-mode *reduction* skip the cooldown", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({
+      ampsSyncValue: 16,
+      ampsSyncAt: new Date(Date.now() - 10_000),
+    });
+    await applyChargeCommand(command("plan", 10));
+    expect(callHaService).not.toHaveBeenCalled();
+  });
+
+  it("sets no current while the charger is off", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({ ampsSyncValue: 6, ampsSyncAt: null });
+    await applyChargeCommand(command("off", 16, false));
+    expect(callHaService).not.toHaveBeenCalled();
+  });
+
+  it("never pushes a current while simulation mode is active", async () => {
+    settingsFindUnique.mockResolvedValue({
+      ...CURRENT_SETTINGS,
+      simulatedNow: new Date("2026-01-01T12:00:00Z"),
+    });
+    await applyChargeCommand(command("surplus", 9));
+    expect(callHaService).not.toHaveBeenCalled();
+    expect(planStateFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("records the error and leaves ampsSyncValue untouched on failure", async () => {
+    settingsFindUnique.mockResolvedValue(CURRENT_SETTINGS);
+    planStateFindUnique.mockResolvedValue({ ampsSyncValue: null, ampsSyncAt: null });
+    callHaService.mockRejectedValue(new Error("HA unreachable"));
+    await applyChargeCommand(command("surplus", 9));
+    expect(planStateUpdate).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { haSyncError: "HA unreachable" },
+    });
   });
 });
 

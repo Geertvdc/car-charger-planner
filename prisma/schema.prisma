@@ -22,12 +22,32 @@ model Settings {
   energyTaxPerKwh    Float    @default(0.1088)
   supplierFeePerKwh  Float    @default(0.02)
   vatRate            Float    @default(0.21)
-  feedInTariffPerKwh Float    @default(0.0)
+  // --- Export (feed-in) price make-up ---
+  // What you *receive* per exported kWh. Asymmetric with the import price above: the
+  // energy tax is a consumption tax and is never refunded on export, so self-consuming a
+  // kWh is worth ~0.13 EUR more than feeding it back. See src/lib/pricing.ts.
+  // "market" = (rawEpex + feedInFeePerKwh) * (1 + vatRate when feedInInclVat)
+  // "fixed"  = feedInTariffPerKwh flat, regardless of the market price.
+  feedInBasis        String   @default("market")
+  feedInFeePerKwh    Float    @default(0.02) // added to raw; use a negative value if deducted
+  feedInInclVat      Boolean  @default(true)
+  feedInTariffPerKwh Float    @default(0.0) // the flat rate, used when feedInBasis = "fixed"
   // Fraction of forecast PV assumed available to the car (rest is house load). 0..1
   houseLoadFactor    Float    @default(0.7)
   // Opportunistic charging: when an hour's effective cost/kWh drops at or below this,
   // charge even without a target need (capped at CarConfig.maxSoc). Null disables it.
   cheapPriceThresholdPerKwh Float?
+  // --- Solar surplus charging (closed loop on the measured grid reading) ---
+  // When on, any measured export is diverted into the car by modulating the charger
+  // current, as long as the cable is connected and SoC is below CarConfig.maxSoc.
+  surplusChargingEnabled Boolean @default(false)
+  // Export to leave untouched, in watts — a buffer against overshooting into import.
+  surplusReserveWatts    Int     @default(0)
+  // Hysteresis. Surplus must hold above the minimum for surplusStartDelayMin before a
+  // session starts, and below it for surplusStopDelayMin before one stops; a brief dip
+  // holds at minCurrentA instead, since importing a little beats bouncing the session.
+  surplusStartDelayMin   Int     @default(2)
+  surplusStopDelayMin    Int     @default(10)
   historyDays        Int      @default(3)
   // --- Home Assistant REST API client (this app -> HA) ---
   // Both empty is the normal case when running as a Home Assistant add-on: the app
@@ -41,9 +61,23 @@ model Settings {
   // differently (e.g. a custom "zaptec.start_charging" service).
   haChargerOnService       String @default("switch.turn_on")
   haChargerOffService      String @default("switch.turn_off")
-  // HomeWizard power sensor entity read via HA (e.g. sensor.p1_meter_active_power_w).
-  // Read + stored for display only — not wired into the planning engine.
+  // Charger current limit, e.g. number.zaptec_go_2_charger_max_current. Written at most
+  // once per 5 minutes by the surplus controller — see src/lib/ha-control.ts. The value
+  // is sent as {entity_id, [haChargerCurrentValueKey]: amps}, so a service with a
+  // different payload shape (e.g. zaptec.limit_current / available_current) also works.
+  haChargerCurrentEntityId String @default("")
+  haChargerCurrentService  String @default("number.set_value")
+  haChargerCurrentValueKey String @default("value")
+  // Grid meter, e.g. sensor.p1_meter_..._active_power. POSITIVE = importing from the
+  // grid, negative = exporting. This is the signal the surplus controller follows.
   haPowerSensorEntityId    String @default("")
+  // The charger's own power draw, e.g. sensor.zaptec_go_2_charge_power (W). Required for
+  // surplus charging: the grid reading already includes the car, so the car has to be
+  // added back out to find the true household surplus.
+  haChargerPowerEntityId   String @default("")
+  // Optional PV production sensor, e.g. sensor.envoy_..._current_energy_production (W).
+  // Display/diagnostics only — the controller works off grid + charger power alone.
+  haSolarPowerEntityId     String @default("")
   // Car SoC % sensor read via HA (e.g. the EU Data Act portal integration for Cupra/VW
   // Group cars). Read-only, feeds CarState with source "ha_car" — see refreshCarSoc().
   haCarSocEntityId         String @default("")
@@ -63,6 +97,15 @@ model CarConfig {
   efficiency    Float    @default(0.9) // 0..1
   minSoc        Int      @default(10)
   maxSoc        Int      @default(90)
+  // --- Electrical envelope, used to convert surplus watts into a charger current ---
+  // A = W / (phases * voltage). minCurrentA is the IEC 61851 floor (and the Zaptec
+  // installation's own configured minimum): below it the car simply won't draw. With
+  // 3 phases that puts the smallest possible charge at ~4.1 kW, so surplus charging
+  // can't engage on a weak PV day. No 1/3-phase switching — see src/lib/surplus.ts.
+  phases        Int      @default(3)
+  voltage       Int      @default(230)
+  minCurrentA   Int      @default(6)
+  maxCurrentA   Int      @default(16)
   updatedAt     DateTime @updatedAt @default(now())
 }
 
@@ -116,19 +159,28 @@ model CarState {
   rawUpdatedAt DateTime?
 }
 
-// Instantaneous home power reading (e.g. HomeWizard P1 via HA) — display only.
+// One aligned sample of the household's instantaneous power, taken every 30 s.
+// The three readings are fetched together so the surplus controller can subtract the
+// car from the grid figure without comparing values from different moments.
 model PowerReading {
-  id     Int      @id @default(autoincrement())
-  watts  Float
-  at     DateTime @default(now())
-  source String   @default("homewizard_ha")
+  id           Int      @id @default(autoincrement())
+  watts        Float // grid: POSITIVE = importing, negative = exporting
+  chargerWatts Float? // what the car is drawing right now; null when not configured
+  pvWatts      Float? // PV production; null when not configured. Display only.
+  at           DateTime @default(now())
+  source       String   @default("homewizard_ha")
+
+  @@index([at])
 }
 
 model PriceSnapshot {
   id         Int      @id @default(autoincrement())
   hourStart  DateTime @unique
   rawPrice   Float // raw EPEX EUR/kWh
-  allInPrice Float // EUR/kWh incl. taxes/fees/VAT
+  allInPrice Float // EUR/kWh incl. taxes/fees/VAT — what importing costs
+  // EUR/kWh received when exporting this slot. Can be negative (see feedInPrice()).
+  // Rows written before this column existed read 0 until their day is refetched.
+  feedInPrice Float   @default(0)
   fetchedAt  DateTime @default(now())
 }
 
@@ -146,7 +198,12 @@ model ChargeSlot {
   expectedKwh Float    @default(0)
   expectedCost Float   @default(0)
   source      String   @default("grid") // grid | solar | mixed
-  reason      String   @default("target") // target | cheap — why this hour was scheduled
+  // target = needed for a deadline | cheap = below the price threshold |
+  // surplus = forecast PV covers it, so charging displaces export instead of importing
+  reason      String   @default("target")
+  // Charger current this slot is planned at. Full power for target/cheap; for surplus
+  // slots, only what the forecast PV can actually carry.
+  expectedAmps Int     @default(0)
 }
 
 model PlanState {
@@ -158,10 +215,28 @@ model PlanState {
   reason        String   @default("")
   feasible      Boolean  @default(true)
   shortfallKwh  Float    @default(0)
+  // --- What the *plan* wants (written by recomputePlan) ---
+  // recomputePlan no longer talks to hardware itself; it records its intent here and the
+  // controller reconciles it with live surplus. One writer to the charger — see
+  // src/lib/controller.ts.
+  plannedOn     Boolean  @default(false)
+  plannedAmps   Int?
+  plannedReason String?  // target | cheap | surplus — reason of the current slot
+  // --- What the *controller* decided (written by runChargeController) ---
+  mode          String   @default("off") // off | plan | surplus
+  commandedAmps Int?
+  // Hysteresis timestamps: when surplus first rose above / fell below the minimum.
+  // Persisted so the delays survive across ticks and restarts.
+  surplusSinceAt DateTime?
+  deficitSinceAt DateTime?
   // Last on/off state successfully pushed to Home Assistant; null = never pushed.
   haSyncOn      Boolean?
   haSyncAt      DateTime?
   haSyncError   String?
+  // Last current successfully pushed, and when. Throttled far harder than on/off:
+  // Zaptec's cloud API dislikes frequent current changes, so at most one push per 5 min.
+  ampsSyncValue Int?
+  ampsSyncAt    DateTime?
   // Latest known charger-connected state (see refreshChargerConnected()) — used to
   // force the current hour "home" even when the schedule says away.
   chargerConnected Boolean @default(false)
@@ -177,5 +252,7 @@ model ChargeLog {
   id   Int      @id @default(autoincrement())
   at   DateTime @default(now())
   on   Boolean
+  mode String? // off | plan | surplus — lets the timeline colour history by mode
+  amps Int?
   note String?
 }

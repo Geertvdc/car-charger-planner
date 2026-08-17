@@ -1,4 +1,5 @@
-import { refreshAll, refreshChargerConnected } from "./refresh";
+import { refreshAll, refreshChargerConnected, refreshPowerSample } from "./refresh";
+import { runChargeController } from "./controller";
 import { recomputePlan } from "./plan";
 
 const g = globalThis as unknown as {
@@ -8,6 +9,11 @@ const g = globalThis as unknown as {
 
 const REFRESH_MS = 30 * 60 * 1000; // full data refresh + recompute every 30 min
 const RECOMPUTE_MS = 60 * 1000; // advance the plan "now" pointer every 1 min
+// Sample power and re-run the surplus controller every 30 s. Sampling this often is what
+// lets the controller take a median instead of trusting one instantaneous reading; the
+// controller itself still only *pushes* a new current at most once every 5 min (see
+// MIN_AMPS_PUSH_INTERVAL_MS in ha-control.ts).
+const CONTROL_MS = 30 * 1000;
 
 /**
  * Background schedule using plain intervals (no external cron dep, bundles cleanly).
@@ -42,6 +48,19 @@ export function startScheduler(): void {
       RECOMPUTE_MS
     )
   );
+  g.__chargerTimers.push(
+    setInterval(
+      () =>
+        // Deliberately does *not* chain a recomputePlan(): the plan only changes on slot
+        // boundaries, while this tick exists to follow the meter. Quiet, too — at 30 s a
+        // log line per tick would bury everything else.
+        runQuiet("control", async () => {
+          await refreshPowerSample().catch(() => undefined);
+          return runChargeController();
+        }),
+      CONTROL_MS
+    )
+  );
 
   console.log("[scheduler] started");
 }
@@ -51,6 +70,14 @@ async function run(name: string, fn: () => Promise<unknown>) {
     await fn();
     await recomputePlan().catch(() => undefined);
     console.log(`[scheduler] ${name} ok`);
+  } catch (e) {
+    console.error(`[scheduler] ${name} failed:`, (e as Error).message);
+  }
+}
+
+async function runQuiet(name: string, fn: () => Promise<unknown>) {
+  try {
+    await fn();
   } catch (e) {
     console.error(`[scheduler] ${name} failed:`, (e as Error).message);
   }

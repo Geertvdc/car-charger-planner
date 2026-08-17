@@ -1,13 +1,25 @@
 import { prisma } from "./db";
 import { callHaService } from "./ha-client";
+import type { ChargeCommand } from "./surplus";
 
 const DEFAULT_ON_SERVICE = "switch.turn_on";
 const DEFAULT_OFF_SERVICE = "switch.turn_off";
+const DEFAULT_CURRENT_SERVICE = "number.set_value";
+const DEFAULT_CURRENT_VALUE_KEY = "value";
 // Rate-limit real HA writes so rapid successive decision flips (e.g. dragging the
 // target-SoC slider, which saves — and recomputes — on every step) don't bounce a
 // real relay. The next recomputePlan() call (another save, or the ~10 min scheduler
 // tick) retries and catches up once the cooldown has passed.
 const MIN_PUSH_INTERVAL_MS = 60_000;
+/**
+ * Current changes are throttled far harder than on/off. The surplus controller runs every
+ * 30 s, but a charger's current limit goes through the vendor's cloud (Zaptec's, here),
+ * which throttles callers that hammer it — and the physical charger renegotiates with the
+ * car on every change. One push per 5 minutes is the deliberate ceiling.
+ */
+const MIN_AMPS_PUSH_INTERVAL_MS = 5 * 60 * 1000;
+/** Don't spend a push on a change the charger's 1 A step can't even represent. */
+const AMPS_DEADBAND = 1;
 
 export type ChargerControlReason =
   | "production"
@@ -63,12 +75,14 @@ function parseService(raw: string | undefined, fallback: string): { domain: stri
 }
 
 /**
- * Push the charger on/off decision to Home Assistant. No-ops if not configured or
- * already in sync (avoids redundant service calls on real hardware).
- * Never throws — failures are recorded on PlanState.haSyncError and self-heal on the
- * next recomputePlan() call, since haSyncOn is only updated on success.
+ * Push a charge command to Home Assistant — the single point in the app that operates
+ * real hardware. On/off and current are pushed independently, on their own cooldowns.
+ *
+ * No-ops if not configured or already in sync (avoids redundant service calls on real
+ * hardware). Never throws — failures are recorded on PlanState.haSyncError and self-heal
+ * on the next tick, since haSyncOn/ampsSyncValue are only updated on success.
  */
-export async function syncChargerState(chargingNow: boolean): Promise<void> {
+export async function applyChargeCommand(cmd: ChargeCommand): Promise<void> {
   // Checked before anything else: a dev copy must not reach real hardware even to
   // read the settings row that would tell it which entity to switch.
   if (!chargerControlStatus().enabled) return;
@@ -77,17 +91,43 @@ export async function syncChargerState(chargingNow: boolean): Promise<void> {
   // Simulation mode computes a plan for a fake "now" — never let that reach real
   // hardware. Only the live clock is allowed to control the actual charger.
   if (settings?.simulatedNow) return;
-  const entityId = settings?.haChargerSwitchEntityId?.trim();
-  if (!entityId) return;
+
+  // Nothing to drive at all — don't even read the plan row.
+  const hasSwitch = !!settings?.haChargerSwitchEntityId?.trim();
+  const hasCurrent = !!settings?.haChargerCurrentEntityId?.trim();
+  if (!hasSwitch && !hasCurrent) return;
 
   const plan = await prisma.planState.findUnique({ where: { id: 1 } });
-  if (plan?.haSyncOn === chargingNow) return;
 
-  if (plan?.haSyncAt && Date.now() - plan.haSyncAt.getTime() < MIN_PUSH_INTERVAL_MS) {
-    return;
-  }
+  // Current first: raising the limit before starting means the session negotiates at the
+  // right current straight away instead of at whatever it was left at.
+  await pushCurrent(cmd, settings, plan);
+  await pushOnOff(cmd.on, settings, plan);
+}
 
-  const { domain, service } = chargingNow
+/** Back-compat wrapper for callers that only care about on/off. */
+export async function syncChargerState(chargingNow: boolean): Promise<void> {
+  await applyChargeCommand({
+    on: chargingNow,
+    amps: 0,
+    mode: chargingNow ? "plan" : "off",
+    reason: "",
+    availableWatts: null,
+    surplusSinceAt: null,
+    deficitSinceAt: null,
+  });
+}
+
+type SettingsRow = Awaited<ReturnType<typeof prisma.settings.findUnique>>;
+type PlanRow = Awaited<ReturnType<typeof prisma.planState.findUnique>>;
+
+async function pushOnOff(on: boolean, settings: SettingsRow, plan: PlanRow): Promise<void> {
+  const entityId = settings?.haChargerSwitchEntityId?.trim();
+  if (!entityId) return;
+  if (plan?.haSyncOn === on) return;
+  if (plan?.haSyncAt && Date.now() - plan.haSyncAt.getTime() < MIN_PUSH_INTERVAL_MS) return;
+
+  const { domain, service } = on
     ? parseService(settings?.haChargerOnService, DEFAULT_ON_SERVICE)
     : parseService(settings?.haChargerOffService, DEFAULT_OFF_SERVICE);
 
@@ -95,10 +135,45 @@ export async function syncChargerState(chargingNow: boolean): Promise<void> {
     await callHaService(domain, service, { entity_id: entityId });
     await prisma.planState.update({
       where: { id: 1 },
-      data: { haSyncOn: chargingNow, haSyncAt: new Date(), haSyncError: null },
+      data: { haSyncOn: on, haSyncAt: new Date(), haSyncError: null },
     });
   } catch (e) {
     console.error("[ha-control] charger push failed:", (e as Error).message);
+    await prisma.planState
+      .update({ where: { id: 1 }, data: { haSyncError: (e as Error).message } })
+      .catch(() => undefined);
+  }
+}
+
+async function pushCurrent(cmd: ChargeCommand, settings: SettingsRow, plan: PlanRow): Promise<void> {
+  const entityId = settings?.haChargerCurrentEntityId?.trim();
+  if (!entityId) return;
+  // Nothing to set while the charger is off; the next start will set it.
+  if (!cmd.on || !Number.isFinite(cmd.amps) || cmd.amps <= 0) return;
+
+  const amps = Math.round(cmd.amps);
+  const last = plan?.ampsSyncValue ?? null;
+  if (last != null && Math.abs(amps - last) < AMPS_DEADBAND) return;
+
+  // A handover to plan mode raises to full power and must not wait out a cooldown that a
+  // surplus push started seconds earlier — a deadline slot stuck at 6 A for five minutes
+  // is exactly the failure this whole throttle is not meant to cause.
+  const isPlanRamp = cmd.mode === "plan" && (last == null || amps > last);
+  const cooling =
+    plan?.ampsSyncAt != null && Date.now() - plan.ampsSyncAt.getTime() < MIN_AMPS_PUSH_INTERVAL_MS;
+  if (cooling && !isPlanRamp) return;
+
+  const { domain, service } = parseService(settings?.haChargerCurrentService, DEFAULT_CURRENT_SERVICE);
+  const valueKey = settings?.haChargerCurrentValueKey?.trim() || DEFAULT_CURRENT_VALUE_KEY;
+
+  try {
+    await callHaService(domain, service, { entity_id: entityId, [valueKey]: amps });
+    await prisma.planState.update({
+      where: { id: 1 },
+      data: { ampsSyncValue: amps, ampsSyncAt: new Date(), haSyncError: null },
+    });
+  } catch (e) {
+    console.error("[ha-control] current push failed:", (e as Error).message);
     await prisma.planState
       .update({ where: { id: 1 }, data: { haSyncError: (e as Error).message } })
       .catch(() => undefined);

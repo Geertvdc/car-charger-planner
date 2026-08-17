@@ -2,7 +2,7 @@ import { prisma } from "./db";
 import { fetchEnergyZeroDay } from "./energyzero";
 import { fetchForecastSolarString } from "./forecastsolar";
 import { getEntityState } from "./ha-client";
-import { allInPrice } from "./pricing";
+import { allInPrice, feedInPrice } from "./pricing";
 import { addDaysISO, localDayBoundsUTC, todayISO } from "./time";
 
 export interface RefreshResult {
@@ -73,10 +73,21 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
       }
       for (const p of points) {
         const allIn = allInPrice(p.rawPrice, settings);
+        const feedIn = feedInPrice(p.rawPrice, settings);
         await prisma.priceSnapshot.upsert({
           where: { hourStart: p.hourStart },
-          create: { hourStart: p.hourStart, rawPrice: p.rawPrice, allInPrice: allIn },
-          update: { rawPrice: p.rawPrice, allInPrice: allIn, fetchedAt: new Date() },
+          create: {
+            hourStart: p.hourStart,
+            rawPrice: p.rawPrice,
+            allInPrice: allIn,
+            feedInPrice: feedIn,
+          },
+          update: {
+            rawPrice: p.rawPrice,
+            allInPrice: allIn,
+            feedInPrice: feedIn,
+            fetchedAt: new Date(),
+          },
         });
         count++;
       }
@@ -128,19 +139,50 @@ export async function refreshSolar(): Promise<RefreshResult["solar"]> {
   }
 }
 
-/** Read the configured HomeWizard power sensor via HA and log one reading. Display only. */
-export async function refreshPower(): Promise<RefreshResult["power"]> {
+/** Samples older than this are of no use to the controller's median window. */
+const POWER_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
+
+/** Read one entity's state as a number; null when unset, missing or unreadable. */
+async function readWatts(entityId: string | undefined): Promise<number | null> {
+  const id = entityId?.trim();
+  if (!id) return null;
+  const entity = await getEntityState(id);
+  if (!entity) return null;
+  const value = parseFloat(entity.state);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Take one aligned power sample: grid, charger and PV together.
+ *
+ * All three are fetched in parallel and stored on a single row on purpose. The surplus
+ * controller subtracts the charger from the grid figure to find the household's true
+ * surplus, and doing that across readings taken seconds apart — while the car's draw is
+ * ramping — produces phantom surplus and a charger that hunts.
+ *
+ * Called every 30 s by the scheduler, so old rows are pruned as we go.
+ */
+export async function refreshPowerSample(): Promise<RefreshResult["power"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const entityId = settings.haPowerSensorEntityId?.trim();
   if (!entityId) return { ok: true, count: 0 };
   try {
-    const entity = await getEntityState(entityId);
-    if (!entity) return { ok: true, count: 0 };
-    const watts = parseFloat(entity.state);
+    const [gridEntity, chargerWatts, pvWatts] = await Promise.all([
+      getEntityState(entityId),
+      readWatts(settings.haChargerPowerEntityId),
+      readWatts(settings.haSolarPowerEntityId),
+    ]);
+    // A missing entity is benign (nothing to record yet); a present entity reporting
+    // something non-numeric is a real misconfiguration worth surfacing.
+    if (!gridEntity) return { ok: true, count: 0 };
+    const watts = parseFloat(gridEntity.state);
     if (!Number.isFinite(watts)) {
-      return { ok: false, count: 0, error: `non-numeric state from HA: ${entity.state}` };
+      return { ok: false, count: 0, error: `non-numeric state from HA: ${gridEntity.state}` };
     }
-    await prisma.powerReading.create({ data: { watts } });
+    await prisma.powerReading.create({ data: { watts, chargerWatts, pvWatts } });
+    await prisma.powerReading.deleteMany({
+      where: { at: { lt: new Date(Date.now() - POWER_RETENTION_MS) } },
+    });
     return { ok: true, count: 1 };
   } catch (e) {
     return { ok: false, count: 0, error: (e as Error).message };
@@ -271,7 +313,7 @@ export async function refreshAll(): Promise<RefreshResult> {
   const [prices, solar, power, carSoc, chargerConnected] = await Promise.all([
     refreshPrices(),
     refreshSolar(),
-    refreshPower(),
+    refreshPowerSample(),
     refreshCarSoc(),
     refreshChargerConnected(),
   ]);

@@ -13,6 +13,7 @@ function hoursFrom(startISO: string, pattern: string): EngineHour[] {
   return [...pattern].map((c, i) => ({
     hourStart: new Date(new Date(startISO).getTime() + i * 3600_000),
     allInPrice: 0.2,
+    feedInPrice: 0.08,
     solarWh: 0,
     availability: (c === "H" ? "HOME" : "AWAY") as AvailStatus,
   }));

@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { geocodeLocation, saveSettings } from "@/app/actions";
 import { probeHaConnection, type HaEntitySummary, type HaProbe } from "@/lib/ha-client";
 import { chargerControlStatus } from "@/lib/ha-control";
+import { allInPrice, feedInPrice } from "@/lib/pricing";
 
 export const dynamic = "force-dynamic";
 
@@ -64,11 +65,55 @@ export default async function SettingsPage() {
             All-in price = (raw EPEX + energy tax + supplier fee) × (1 + VAT). Adjust to match your
             dynamic contract (Tibber, Frank, Zonneplan, …).
           </p>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field label="Energy tax" name="energyTaxPerKwh" defaultValue={s.energyTaxPerKwh} step="0.0001" />
             <Field label="Supplier fee" name="supplierFeePerKwh" defaultValue={s.supplierFeePerKwh} step="0.0001" />
             <Field label="VAT rate" name="vatRate" defaultValue={s.vatRate} step="0.01" />
-            <Field label="Feed-in tariff" name="feedInTariffPerKwh" defaultValue={s.feedInTariffPerKwh} step="0.0001" />
+          </div>
+        </section>
+
+        <section>
+          <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">
+            Export (feed-in) price
+          </h2>
+          <p className="mb-2 text-xs text-[var(--color-muted)]">
+            What you <em>receive</em> per kWh fed back to the grid. The energy tax is a consumption
+            tax and is never refunded on export, so a kWh kept at home is worth much more than the
+            same kWh exported — that gap is what makes solar surplus charging pay.{" "}
+            <strong>Market</strong> = (raw EPEX + fee) × VAT, following the price hour by hour;{" "}
+            <strong>fixed</strong> = a flat rate. The fee is <em>added</em> to the raw price, so
+            enter a negative number if your supplier deducts it instead.
+          </p>
+          <FeedInExample s={s} />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <label className="block">
+              <span className="label">Basis</span>
+              <select className="select" name="feedInBasis" defaultValue={s.feedInBasis}>
+                <option value="market">Market (follows raw EPEX)</option>
+                <option value="fixed">Fixed rate</option>
+              </select>
+            </label>
+            <Field
+              label="Feed-in fee (added to raw)"
+              name="feedInFeePerKwh"
+              defaultValue={s.feedInFeePerKwh}
+              step="0.0001"
+            />
+            <label className="flex items-end gap-2 pb-2">
+              <input
+                type="checkbox"
+                name="feedInInclVat"
+                defaultChecked={s.feedInInclVat}
+                className="h-4 w-4"
+              />
+              <span className="label mb-0">VAT applies to export</span>
+            </label>
+            <Field
+              label="Fixed feed-in tariff"
+              name="feedInTariffPerKwh"
+              defaultValue={s.feedInTariffPerKwh}
+              step="0.0001"
+            />
           </div>
         </section>
 
@@ -110,7 +155,10 @@ export default async function SettingsPage() {
               ["Charger switch", s.haChargerSwitchEntityId],
               ["Charger status", s.haChargerStatusEntityId],
               ["Charger connected", s.haChargerConnectedEntityId],
-              ["Power meter", s.haPowerSensorEntityId],
+              ["Charger current limit", s.haChargerCurrentEntityId],
+              ["Grid meter", s.haPowerSensorEntityId],
+              ["Charger power", s.haChargerPowerEntityId],
+              ["Solar production", s.haSolarPowerEntityId],
               ["Car SoC", s.haCarSocEntityId],
             ]}
           />
@@ -195,19 +243,115 @@ export default async function SettingsPage() {
 
         <section>
           <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">
-            Home Assistant — power meter (optional, display only)
+            Solar surplus charging
           </h2>
           <p className="mb-2 text-xs text-[var(--color-muted)]">
-            Reads your HomeWizard power sensor via HA on the regular data refresh and shows the
-            latest reading on the dashboard. Not used in the planning engine yet.
+            Follows the <strong>measured</strong> grid meter every 30 seconds and diverts any power
+            you would otherwise export into the car, by modulating the charger current. Runs
+            whenever the cable is connected and the battery is below the car&apos;s Max SoC. A
+            deadline always wins: while the plan needs the car charged, it runs at full power and
+            the grid tops up whatever the sun doesn&apos;t cover.
           </p>
-          <Field
-            label="Power sensor entity ID"
-            name="haPowerSensorEntityId"
-            defaultValue={s.haPowerSensorEntityId}
-            type="text"
-            list={ENTITY_LIST_ID}
-          />
+          <p className="mb-2 text-xs text-[var(--color-muted)]">
+            The current is pushed to Home Assistant <strong>at most once every 5 minutes</strong>,
+            and each decision uses the median of the readings since the last one, so a kettle or an
+            oven can&apos;t drag the charge rate around. With {" "}
+            <strong>
+              {/* the practical floor most people are surprised by */}3 phases at 6 A the smallest
+              possible charge is about 4.1 kW
+            </strong>
+            , so surplus charging only engages once you are exporting at least that much.
+          </p>
+          <SurplusReadinessNotice s={s} />
+          <div className="mb-3 flex items-center gap-2">
+            <input
+              type="checkbox"
+              name="surplusChargingEnabled"
+              defaultChecked={s.surplusChargingEnabled}
+              className="h-4 w-4"
+              id="surplusChargingEnabled"
+            />
+            <label htmlFor="surplusChargingEnabled" className="text-sm">
+              Enable solar surplus charging
+            </label>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field
+              label="Reserve (W kept exporting)"
+              name="surplusReserveWatts"
+              defaultValue={s.surplusReserveWatts}
+              step="50"
+            />
+            <Field
+              label="Start delay (min)"
+              name="surplusStartDelayMin"
+              defaultValue={s.surplusStartDelayMin}
+              step="1"
+            />
+            <Field
+              label="Stop delay (min)"
+              name="surplusStopDelayMin"
+              defaultValue={s.surplusStopDelayMin}
+              step="1"
+            />
+          </div>
+          <p className="mb-2 mt-4 text-xs text-[var(--color-muted)]">
+            <strong>Grid meter</strong> must read positive when importing and negative when
+            exporting. <strong>Charger power</strong> is required: the grid reading already includes
+            the car, so without it the controller would mistake its own draw for household demand
+            and throttle itself to nothing. <strong>Solar production</strong> is optional and shown
+            on the timeline only.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field
+              label="Grid meter entity ID"
+              name="haPowerSensorEntityId"
+              defaultValue={s.haPowerSensorEntityId}
+              type="text"
+              list={ENTITY_LIST_ID}
+            />
+            <Field
+              label="Charger power entity ID (W)"
+              name="haChargerPowerEntityId"
+              defaultValue={s.haChargerPowerEntityId}
+              type="text"
+              list={ENTITY_LIST_ID}
+            />
+            <Field
+              label="Solar production entity ID (W, optional)"
+              name="haSolarPowerEntityId"
+              defaultValue={s.haSolarPowerEntityId}
+              type="text"
+              list={ENTITY_LIST_ID}
+            />
+          </div>
+          <p className="mb-2 mt-4 text-xs text-[var(--color-muted)]">
+            The current limit entity is what actually gets written — on a Zaptec that is{" "}
+            <code>number.&lt;charger&gt;_charger_max_current</code>. The value is sent as{" "}
+            <code>{"{entity_id, <value key>: amps}"}</code>, so a service with a different payload
+            shape works too. Leave the entity blank to keep control on/off only.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field
+              label="Charger current entity ID"
+              name="haChargerCurrentEntityId"
+              defaultValue={s.haChargerCurrentEntityId}
+              type="text"
+              list={ENTITY_LIST_ID}
+            />
+            <Field
+              label="Service to set the current"
+              name="haChargerCurrentService"
+              defaultValue={s.haChargerCurrentService}
+              type="text"
+            />
+            <Field
+              label="Payload value key"
+              name="haChargerCurrentValueKey"
+              defaultValue={s.haChargerCurrentValueKey}
+              type="text"
+            />
+          </div>
         </section>
 
         <section>
@@ -255,6 +399,49 @@ function EntityDatalist({ entities }: { entities: HaEntitySummary[] }) {
         </option>
       ))}
     </datalist>
+  );
+}
+
+type SettingsRow = Awaited<ReturnType<typeof prisma.settings.findUniqueOrThrow>>;
+
+/**
+ * The import/export spread in euros, worked out on the settings actually saved. Abstract
+ * markup fields are hard to sanity-check; a single worked example makes a wrong sign or a
+ * missing VAT box obvious at a glance.
+ */
+function FeedInExample({ s }: { s: SettingsRow }) {
+  const raw = 0.08;
+  const importPrice = allInPrice(raw, s);
+  const exportPrice = feedInPrice(raw, s);
+  const premium = importPrice - exportPrice;
+  return (
+    <p className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-xs text-[var(--color-muted)]">
+      At a raw price of €0.080/kWh you pay{" "}
+      <span className="text-[var(--color-text)]">€{importPrice.toFixed(4)}</span> to import and
+      receive <span className="text-[var(--color-text)]">€{exportPrice.toFixed(4)}</span> to export
+      — every kWh kept at home is worth{" "}
+      <span className="text-[var(--color-charge-surplus)]">€{premium.toFixed(4)}</span> more.
+    </p>
+  );
+}
+
+/**
+ * Surplus charging silently does nothing without the charger-power and current entities,
+ * and "enabled but idle" is the hardest state to debug. Say which piece is missing.
+ */
+function SurplusReadinessNotice({ s }: { s: SettingsRow }) {
+  if (!s.surplusChargingEnabled) return null;
+  const missing: string[] = [];
+  if (!s.haPowerSensorEntityId.trim()) missing.push("a grid meter entity");
+  if (!s.haChargerPowerEntityId.trim()) missing.push("a charger power entity");
+  if (!s.haChargerCurrentEntityId.trim()) missing.push("a charger current entity");
+  if (!s.haChargerConnectedEntityId.trim()) missing.push("a charger connected entity");
+  if (missing.length === 0) return null;
+  return (
+    <p className="mb-2 text-xs text-[#ffb4a2]">
+      <strong>Surplus charging is on but can&apos;t run yet</strong> — still missing{" "}
+      {missing.join(", ")}.
+    </p>
   );
 }
 

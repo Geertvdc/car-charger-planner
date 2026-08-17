@@ -1,8 +1,7 @@
 import { prisma } from "./db";
 import { applyChargerConnectedOverride, resolveDay, statusForHour, WindowDef } from "./availability";
+import { runChargeController } from "./controller";
 import { computeMultiPlan, Deadline, EngineHour } from "./engine";
-import { logDecisionTransition } from "./ha";
-import { syncChargerState } from "./ha-control";
 import { resolveNow } from "./now";
 import {
   addDaysISO,
@@ -67,17 +66,19 @@ export async function recomputePlan(nowOverride?: Date) {
         where: { id: 1 },
         data: {
           computedAt: now,
-          charging: false,
           chargingUntil: null,
           targetSoc: null,
           feasible: true,
           shortfallKwh: 0,
           reason,
+          plannedOn: false,
+          plannedAmps: null,
+          plannedReason: null,
         },
       }),
     ]);
-    await syncChargerState(false).catch(() => undefined);
-    await logDecisionTransition(false).catch(() => undefined);
+    // No deadline is not a reason to stop soaking up surplus — the controller decides.
+    await runChargeController(nowOverride);
     return;
   }
 
@@ -86,7 +87,7 @@ export async function recomputePlan(nowOverride?: Date) {
     prisma.priceSnapshot.findMany({ where: { hourStart: { gte: nowHour, lt: hoursEnd } } }),
     prisma.solarForecast.findMany({ where: { hourStart: { gte: nowHour, lt: hoursEnd } } }),
   ]);
-  const priceMap = new Map(prices.map((p) => [p.hourStart.getTime(), p.allInPrice]));
+  const priceMap = new Map(prices.map((p) => [p.hourStart.getTime(), p]));
   const solarMap = new Map(solar.map((s) => [s.hourStart.getTime(), s.expectedWh]));
 
   const dayCache = new Map<string, { windows: WindowDef[] }>();
@@ -111,7 +112,8 @@ export async function recomputePlan(nowOverride?: Date) {
     const hourlySolarWh = solarMap.get(floorToHour(t).getTime()) ?? 0;
     hours.push({
       hourStart: new Date(t),
-      allInPrice: price,
+      allInPrice: price.allInPrice,
+      feedInPrice: price.feedInPrice,
       solarWh: hourlySolarWh / 4,
       availability: statusForHour(t, dateISO, day.windows, tz),
     });
@@ -135,10 +137,13 @@ export async function recomputePlan(nowOverride?: Date) {
     chargerPowerKw: car.chargerPowerKw,
     efficiency: car.efficiency,
     houseLoadFactor: settings.houseLoadFactor,
-    feedInTariffPerKwh: settings.feedInTariffPerKwh,
     maxSoc: car.maxSoc,
     cheapPriceThresholdPerKwh: settings.cheapPriceThresholdPerKwh,
     slotHours: SLOT_HOURS,
+    phases: car.phases,
+    voltage: car.voltage,
+    minCurrentA: car.minCurrentA,
+    maxCurrentA: car.maxCurrentA,
   });
 
   // chargingUntil = end of the contiguous on-run starting at now.
@@ -149,6 +154,8 @@ export async function recomputePlan(nowOverride?: Date) {
     while (onSet.has(end.getTime())) end = addMinutes(end, SLOT_MINUTES);
     chargingUntil = end;
   }
+
+  const currentSlot = result.slots.find((s) => s.on && s.hourStart.getTime() === nowHour.getTime());
 
   await prisma.$transaction([
     // Replace the whole forward-looking plan (history is tracked via ChargeLog).
@@ -163,24 +170,28 @@ export async function recomputePlan(nowOverride?: Date) {
           expectedCost: s.cost,
           source: s.source,
           reason: s.reason,
+          expectedAmps: s.amps,
         })),
     }),
     prisma.planState.update({
       where: { id: 1 },
       data: {
         computedAt: now,
-        charging: result.chargingNow,
         chargingUntil,
         targetSoc: deadlines[0].targetSoc, // the soonest deadline's target
         feasible: result.feasible,
         shortfallKwh: result.shortfallKwh,
         reason: result.reason,
+        // Intent only. runChargeController() below reconciles this with the live grid
+        // reading and is the only thing that touches the charger — see controller.ts.
+        plannedOn: result.chargingNow,
+        plannedAmps: currentSlot?.amps ?? null,
+        plannedReason: currentSlot?.reason ?? null,
       },
     }),
   ]);
 
-  await syncChargerState(result.chargingNow).catch(() => undefined);
-  await logDecisionTransition(result.chargingNow).catch(() => undefined);
+  await runChargeController(nowOverride);
 
   return result;
 }
