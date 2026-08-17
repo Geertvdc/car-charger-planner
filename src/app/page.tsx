@@ -41,6 +41,17 @@ export default async function DashboardPage() {
   const charging = reportedByCharger || (planned && !plannedButUnconnected);
   const feasible = plan?.feasible ?? true;
 
+  // Surplus charging looks different enough from grid charging to be worth calling out:
+  // it's free-ish energy that would otherwise have gone back to the grid, and it runs at
+  // whatever current the sun can carry rather than full power.
+  const onSurplus = charging && plan?.mode === "surplus";
+  const amps = plan?.commandedAmps ?? null;
+  const chargeValue = charging ? (onSurplus ? "Solar surplus" : "Charging") : "Idle";
+  const chargeAccent = onSurplus ? "var(--color-charge-surplus)" : "var(--color-charge)";
+  const chargeDetail = amps
+    ? `${amps} A${latestPower?.chargerWatts ? ` · ${(latestPower.chargerWatts / 1000).toFixed(1)} kW` : ""}`
+    : null;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -58,19 +69,23 @@ export default async function DashboardPage() {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
-          icon={charging ? "⚡" : "◌"}
-          accent={charging ? "var(--color-charge)" : "var(--color-muted)"}
+          icon={charging ? (onSurplus ? "☀" : "⚡") : "◌"}
+          accent={charging ? chargeAccent : "var(--color-muted)"}
           label="Charger right now"
-          value={charging ? "Charging" : "Idle"}
-          valueColor={charging ? "var(--color-charge)" : undefined}
+          value={chargeValue}
+          valueColor={charging ? chargeAccent : undefined}
           caption={
-            charging && !planned
-              ? "Charging outside the plan (reported by charger)"
-              : plannedButUnconnected
-                ? "Plan wants to charge, but the car isn't connected"
-                : plan?.targetSoc
-                  ? `Target ${plan.targetSoc}%`
-                  : "No active target"
+            onSurplus
+              ? `${chargeDetail ?? ""} · soaking up export instead of feeding back`.replace(/^ · /, "")
+              : charging && chargeDetail
+                ? `${chargeDetail}${plan?.targetSoc ? ` · target ${plan.targetSoc}%` : ""}`
+                : charging && !planned
+                  ? "Charging outside the plan (reported by charger)"
+                  : plannedButUnconnected
+                    ? "Plan wants to charge, but the car isn't connected"
+                    : plan?.targetSoc
+                      ? `Target ${plan.targetSoc}%`
+                      : "No active target"
           }
         />
         <StatTile

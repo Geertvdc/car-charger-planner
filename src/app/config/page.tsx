@@ -22,6 +22,27 @@ export default async function ConfigPage() {
           <Field label="Min SoC (%)" name="minSoc" defaultValue={car.minSoc} step="1" />
           <Field label="Max SoC (%)" name="maxSoc" defaultValue={car.maxSoc} step="1" />
         </div>
+
+        <h3 className="pt-1 text-sm font-semibold text-[var(--color-accent)]">
+          Electrical limits
+        </h3>
+        <p className="text-xs text-[var(--color-muted)]">
+          Used to turn watts of solar surplus into a charger current: A = W ÷ (phases × voltage).
+          The minimum is the IEC 61851 floor of 6 A — below it a car simply won&apos;t draw, so on{" "}
+          {car.phases} phase{car.phases === 1 ? "" : "s"} the smallest possible charge is{" "}
+          <strong>
+            {((car.minCurrentA * car.phases * car.voltage) / 1000).toFixed(1)} kW
+          </strong>{" "}
+          and the largest is{" "}
+          <strong>{((car.maxCurrentA * car.phases * car.voltage) / 1000).toFixed(1)} kW</strong>.
+          Surplus charging can&apos;t engage until you are exporting at least the minimum.
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+          <Field label="Phases" name="phases" defaultValue={car.phases} step="1" />
+          <Field label="Voltage (V)" name="voltage" defaultValue={car.voltage} step="1" />
+          <Field label="Min current (A)" name="minCurrentA" defaultValue={car.minCurrentA} step="1" />
+          <Field label="Max current (A)" name="maxCurrentA" defaultValue={car.maxCurrentA} step="1" />
+        </div>
         <button className="btn btn-primary" type="submit">
           Save car
         </button>

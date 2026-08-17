@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const settingsFindUniqueOrThrow = vi.fn();
 const powerReadingCreate = vi.fn();
+const powerReadingDeleteMany = vi.fn();
 const carStateFindFirst = vi.fn();
 const carStateCreate = vi.fn();
 const planStateUpdate = vi.fn();
@@ -10,7 +11,10 @@ const priceSnapshotUpsert = vi.fn();
 vi.mock("./db", () => ({
   prisma: {
     settings: { findUniqueOrThrow: (...args: unknown[]) => settingsFindUniqueOrThrow(...args) },
-    powerReading: { create: (...args: unknown[]) => powerReadingCreate(...args) },
+    powerReading: {
+      create: (...args: unknown[]) => powerReadingCreate(...args),
+      deleteMany: (...args: unknown[]) => powerReadingDeleteMany(...args),
+    },
     carState: {
       findFirst: (...args: unknown[]) => carStateFindFirst(...args),
       create: (...args: unknown[]) => carStateCreate(...args),
@@ -38,20 +42,21 @@ import {
   interpretConnectedState,
   refreshCarSoc,
   refreshChargerConnected,
-  refreshPower,
+  refreshPowerSample,
   refreshPrices,
 } from "./refresh";
 
-describe("refreshPower", () => {
+describe("refreshPowerSample", () => {
   beforeEach(() => {
     settingsFindUniqueOrThrow.mockReset();
     powerReadingCreate.mockReset().mockResolvedValue({});
+    powerReadingDeleteMany.mockReset().mockResolvedValue({ count: 0 });
     getEntityState.mockReset();
   });
 
   it("no-ops when no power sensor entity is configured", async () => {
     settingsFindUniqueOrThrow.mockResolvedValue({ haPowerSensorEntityId: "" });
-    const result = await refreshPower();
+    const result = await refreshPowerSample();
     expect(result).toEqual({ ok: true, count: 0 });
     expect(getEntityState).not.toHaveBeenCalled();
   });
@@ -61,7 +66,7 @@ describe("refreshPower", () => {
       haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
     });
     getEntityState.mockResolvedValue(null);
-    const result = await refreshPower();
+    const result = await refreshPowerSample();
     expect(result).toEqual({ ok: true, count: 0 });
     expect(powerReadingCreate).not.toHaveBeenCalled();
   });
@@ -71,9 +76,40 @@ describe("refreshPower", () => {
       haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
     });
     getEntityState.mockResolvedValue({ state: "1234.5", attributes: {}, last_changed: "" });
-    const result = await refreshPower();
+    const result = await refreshPowerSample();
     expect(result).toEqual({ ok: true, count: 1 });
-    expect(powerReadingCreate).toHaveBeenCalledWith({ data: { watts: 1234.5 } });
+    expect(powerReadingCreate).toHaveBeenCalledWith({
+      data: { watts: 1234.5, chargerWatts: null, pvWatts: null },
+    });
+  });
+
+  it("stores grid, charger and PV on one aligned row", async () => {
+    // The controller subtracts the charger from the grid figure; taking those from rows
+    // seconds apart while the car ramps would invent surplus that isn't there.
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      haChargerPowerEntityId: "sensor.charger",
+      haSolarPowerEntityId: "sensor.pv",
+    });
+    getEntityState.mockImplementation(async (id: string) =>
+      ({
+        "sensor.grid": { state: "-2500", attributes: {}, last_changed: "" },
+        "sensor.charger": { state: "3400", attributes: {}, last_changed: "" },
+        "sensor.pv": { state: "8100", attributes: {}, last_changed: "" },
+      })[id]
+    );
+    const result = await refreshPowerSample();
+    expect(result).toEqual({ ok: true, count: 1 });
+    expect(powerReadingCreate).toHaveBeenCalledWith({
+      data: { watts: -2500, chargerWatts: 3400, pvWatts: 8100 },
+    });
+  });
+
+  it("prunes samples older than the retention window", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ haPowerSensorEntityId: "sensor.grid" });
+    getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
+    await refreshPowerSample();
+    expect(powerReadingDeleteMany).toHaveBeenCalled();
   });
 
   it("fails gracefully on a non-numeric HA state (e.g. 'unavailable')", async () => {
@@ -81,7 +117,7 @@ describe("refreshPower", () => {
       haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
     });
     getEntityState.mockResolvedValue({ state: "unavailable", attributes: {}, last_changed: "" });
-    const result = await refreshPower();
+    const result = await refreshPowerSample();
     expect(result.ok).toBe(false);
     expect(result.count).toBe(0);
     expect(powerReadingCreate).not.toHaveBeenCalled();
@@ -92,7 +128,7 @@ describe("refreshPower", () => {
       haPowerSensorEntityId: "sensor.p1_meter_active_power_w",
     });
     getEntityState.mockRejectedValue(new Error("fetch failed"));
-    const result = await refreshPower();
+    const result = await refreshPowerSample();
     expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
   });
 });

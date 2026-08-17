@@ -17,6 +17,10 @@
   --color-expensive: #b94943;
   --color-charge: #ffc94d;
   --color-charge-cheap: #2e9e6e;
+  /* Solar-surplus charging. Teal, to stay readable against both the amber target colour
+     and the darker green cheap colour, and against all three price colours. */
+  --color-charge-surplus: #35d0c4;
+  --color-export: #35d0c4;
 
   --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, "SFMono-Regular", monospace;

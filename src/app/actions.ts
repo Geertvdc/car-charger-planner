@@ -60,10 +60,17 @@ export async function saveSettings(formData: FormData) {
       energyTaxPerKwh: num(formData.get("energyTaxPerKwh")),
       supplierFeePerKwh: num(formData.get("supplierFeePerKwh")),
       vatRate: num(formData.get("vatRate")),
+      feedInBasis: str(formData.get("feedInBasis"), "market") === "fixed" ? "fixed" : "market",
+      feedInFeePerKwh: num(formData.get("feedInFeePerKwh")),
+      feedInInclVat: formData.get("feedInInclVat") != null,
       feedInTariffPerKwh: num(formData.get("feedInTariffPerKwh")),
       houseLoadFactor: Math.min(1, Math.max(0, num(formData.get("houseLoadFactor"), 0.7))),
       cheapPriceThresholdPerKwh: numOrNull(formData.get("cheapPriceThresholdPerKwh")),
       historyDays: Math.max(0, Math.round(num(formData.get("historyDays"), 3))),
+      surplusChargingEnabled: formData.get("surplusChargingEnabled") != null,
+      surplusReserveWatts: Math.max(0, Math.round(num(formData.get("surplusReserveWatts"), 0))),
+      surplusStartDelayMin: Math.max(0, Math.round(num(formData.get("surplusStartDelayMin"), 2))),
+      surplusStopDelayMin: Math.max(0, Math.round(num(formData.get("surplusStopDelayMin"), 10))),
       haBaseUrl: str(formData.get("haBaseUrl")).trim().replace(/\/+$/, ""),
       haAccessToken: str(formData.get("haAccessToken")),
       haChargerSwitchEntityId: str(formData.get("haChargerSwitchEntityId")).trim(),
@@ -72,6 +79,14 @@ export async function saveSettings(formData: FormData) {
       haChargerOnService: str(formData.get("haChargerOnService"), "switch.turn_on").trim(),
       haChargerOffService: str(formData.get("haChargerOffService"), "switch.turn_off").trim(),
       haPowerSensorEntityId: str(formData.get("haPowerSensorEntityId")).trim(),
+      haChargerPowerEntityId: str(formData.get("haChargerPowerEntityId")).trim(),
+      haSolarPowerEntityId: str(formData.get("haSolarPowerEntityId")).trim(),
+      haChargerCurrentEntityId: str(formData.get("haChargerCurrentEntityId")).trim(),
+      haChargerCurrentService: str(
+        formData.get("haChargerCurrentService"),
+        "number.set_value"
+      ).trim(),
+      haChargerCurrentValueKey: str(formData.get("haChargerCurrentValueKey"), "value").trim(),
       haCarSocEntityId: str(formData.get("haCarSocEntityId")).trim(),
     },
   });
@@ -89,6 +104,12 @@ export async function saveCar(formData: FormData) {
       efficiency: Math.min(1, Math.max(0.5, num(formData.get("efficiency"), 0.9))),
       minSoc: Math.round(num(formData.get("minSoc"), 10)),
       maxSoc: Math.round(num(formData.get("maxSoc"), 90)),
+      phases: Math.max(1, Math.min(3, Math.round(num(formData.get("phases"), 3)))),
+      voltage: Math.max(100, Math.round(num(formData.get("voltage"), 230))),
+      // Never let the floor drop below the IEC 61851 minimum of 6 A — a car simply
+      // refuses to charge below it, and a "successful" push would silently stop charging.
+      minCurrentA: Math.max(6, Math.round(num(formData.get("minCurrentA"), 6))),
+      maxCurrentA: Math.max(6, Math.round(num(formData.get("maxCurrentA"), 16))),
     },
   });
   await recomputePlan().catch(() => undefined);
