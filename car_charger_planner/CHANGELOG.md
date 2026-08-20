@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed the charger being left on when it resumed a charging session on its own (a
+  connectivity blip reconnecting mid-session, the charger's own resume-on-plug-in
+  behaviour). The controller only tracked the state it last commanded, so once it
+  believed it had already turned the charger off it never noticed the charger was
+  charging outside the plan again. It now cross-checks the connected-entity's reported
+  state and re-sends the off command when the two disagree.
+
 ## 0.3.0
 
 - **Solar surplus charging.** The add-on now follows your grid meter every 30 seconds
