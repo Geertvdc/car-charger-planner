@@ -124,7 +124,13 @@ type PlanRow = Awaited<ReturnType<typeof prisma.planState.findUnique>>;
 async function pushOnOff(on: boolean, settings: SettingsRow, plan: PlanRow): Promise<void> {
   const entityId = settings?.haChargerSwitchEntityId?.trim();
   if (!entityId) return;
-  if (plan?.haSyncOn === on) return;
+  // haSyncOn only records the state we last *commanded* — it doesn't notice the charger
+  // resuming a session on its own (a connectivity blip reconnecting mid-charge, a vendor
+  // app override, the car's own resume-on-plug-in behaviour). When we want the charger
+  // off but the connected-entity sensor says it's actively charging anyway, the cache is
+  // stale: force the push through instead of trusting it.
+  const staleOff = on === false && plan?.chargerReportedCharging === true;
+  if (plan?.haSyncOn === on && !staleOff) return;
   if (plan?.haSyncAt && Date.now() - plan.haSyncAt.getTime() < MIN_PUSH_INTERVAL_MS) return;
 
   const { domain, service } = on

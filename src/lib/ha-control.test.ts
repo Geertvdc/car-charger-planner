@@ -78,6 +78,18 @@ describe("syncChargerState", () => {
     expect(callHaService).not.toHaveBeenCalled();
   });
 
+  it("re-pushes off when the cache says off but the charger reports it's actively charging anyway", async () => {
+    // e.g. the cable dropped out and reconnected mid-session, or the charger resumed on
+    // its own — the cache never noticed, but the connected-entity sensor did.
+    settingsFindUnique.mockResolvedValue({ haChargerSwitchEntityId: "switch.zaptec_go_2" });
+    planStateFindUnique.mockResolvedValue({ haSyncOn: false, chargerReportedCharging: true });
+    callHaService.mockResolvedValue(undefined);
+    await syncChargerState(false);
+    expect(callHaService).toHaveBeenCalledWith("switch", "turn_off", {
+      entity_id: "switch.zaptec_go_2",
+    });
+  });
+
   it("calls switch.turn_on and records success when turning on", async () => {
     settingsFindUnique.mockResolvedValue({ haChargerSwitchEntityId: "switch.zaptec_go_2" });
     planStateFindUnique.mockResolvedValue({ haSyncOn: false });
