@@ -1,9 +1,10 @@
 import { prisma } from "./db";
-import { fetchEnergyZeroDay } from "./energyzero";
-import { fetchForecastSolarString } from "./forecastsolar";
+import { fetchEnergyZeroDay, RawPricePoint } from "./energyzero";
+import { fetchForecastSolar } from "./forecastsolar";
 import { getEntityState } from "./ha-client";
+import { fetchNordpoolDay } from "./nordpool";
 import { allInPrice, feedInPrice } from "./pricing";
-import { addDaysISO, localDayBoundsUTC, todayISO } from "./time";
+import { addDaysISO, localDayBoundsUTC, localHour, localTimeToUTC, todayISO } from "./time";
 
 export interface RefreshResult {
   prices: { ok: boolean; count: number; error?: string };
@@ -54,6 +55,22 @@ async function pricesDatesToFetch(today: string, tz: string, historyDays: number
   return dates;
 }
 
+/**
+ * Nordpool has real 15-min NL day-ahead prices; EnergyZero currently only replicates
+ * hourly ones (see energyzero.ts). Try Nordpool first and only fall back — on an error
+ * or on an empty day, e.g. before the auction publishes — so a Nordpool outage doesn't
+ * take pricing down with it.
+ */
+async function fetchDayAheadPrices(dateISO: string, tz: string): Promise<RawPricePoint[]> {
+  try {
+    const points = await fetchNordpoolDay(dateISO);
+    if (points.length > 0) return points;
+  } catch {
+    // fall through to EnergyZero
+  }
+  return fetchEnergyZeroDay(dateISO, tz);
+}
+
 export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const tz = settings.timezone;
@@ -66,7 +83,7 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   // fetched for today/tomorrow, which are the ones the planner actually needs.
   for (const dateISO of dates) {
     try {
-      const points = await fetchEnergyZeroDay(dateISO, tz);
+      const points = await fetchDayAheadPrices(dateISO, tz);
       if (points.length === 0 && dateISO < today) {
         emptyHistoricalDays.add(dateISO);
         continue;
@@ -101,46 +118,114 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   return { ok: false, count, error: errors.join("; ") };
 }
 
-export async function refreshSolar(): Promise<RefreshResult["solar"]> {
-  const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
-  const strings = await prisma.pvString.findMany();
-  const tz = settings.timezone;
-  if (strings.length === 0) return { ok: true, count: 0 };
-  try {
-    const combined = new Map<number, number>();
-    for (const s of strings) {
-      const byHour = await fetchForecastSolarString(
-        {
-          lat: settings.latitude,
-          lon: settings.longitude,
-          tilt: s.tilt,
-          azimuth: s.azimuth,
-          kwp: s.kwp,
-        },
-        tz
-      );
-      for (const [key, wh] of byHour) {
-        combined.set(key, (combined.get(key) ?? 0) + wh);
-      }
-    }
-    let count = 0;
-    for (const [key, wh] of combined) {
-      const hourStart = new Date(key);
+/**
+ * How many days of measured PV to average, by local hour-of-day, for the fallback
+ * estimate below. Wide enough to smooth out day-to-day weather noise; narrow enough to
+ * still track the season as day length shifts week to week.
+ */
+const SOLAR_HISTORY_LOOKBACK_DAYS = 14;
+
+/**
+ * Fallback when Forecast.Solar fails or isn't configured (solarKwp unset): a trailing
+ * 14-day, hour-of-day average of measured PV. Not weather-aware, but needs no panel
+ * geometry, no external API and hits no rate limit — better than no forecast at all.
+ */
+async function estimateSolarFromHistory(tz: string): Promise<number> {
+  const since = new Date(Date.now() - SOLAR_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const readings = await prisma.powerReading.findMany({
+    where: { at: { gte: since }, pvWatts: { not: null } },
+    select: { at: true, pvWatts: true },
+  });
+  if (readings.length === 0) return 0;
+
+  // Average measured watts by local hour-of-day across the whole lookback window.
+  // A 1-hour bucket's average watts numerically equals its Wh, matching what
+  // SolarForecast.expectedWh has always meant.
+  const byHour = new Map<number, { sum: number; count: number }>();
+  for (const r of readings) {
+    const hour = localHour(r.at, tz);
+    const bucket = byHour.get(hour) ?? { sum: 0, count: 0 };
+    bucket.sum += r.pvWatts as number;
+    bucket.count += 1;
+    byHour.set(hour, bucket);
+  }
+
+  const today = todayISO(tz);
+  const tomorrow = addDaysISO(today, 1);
+  let count = 0;
+  for (const dateISO of [today, tomorrow]) {
+    for (let hour = 0; hour < 24; hour++) {
+      const bucket = byHour.get(hour);
+      // No history for this hour yet (e.g. a brand-new install) — leave it unset
+      // rather than writing a false zero.
+      if (!bucket) continue;
+      const expectedWh = Math.max(0, bucket.sum / bucket.count);
+      const hourStart = localTimeToUTC(dateISO, `${String(hour).padStart(2, "0")}:00`, tz);
       await prisma.solarForecast.upsert({
         where: { hourStart },
-        create: { hourStart, expectedWh: wh },
-        update: { expectedWh: wh, fetchedAt: new Date() },
+        create: { hourStart, expectedWh },
+        update: { expectedWh, fetchedAt: new Date() },
       });
       count++;
     }
-    return { ok: true, count };
+  }
+  return count;
+}
+
+export async function refreshSolar(): Promise<RefreshResult["solar"]> {
+  const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
+  const tz = settings.timezone;
+
+  if (settings.solarKwp > 0) {
+    try {
+      const byHour = await fetchForecastSolar(
+        {
+          lat: settings.latitude,
+          lon: settings.longitude,
+          tilt: settings.solarTilt,
+          azimuth: settings.solarAzimuth,
+          kwp: settings.solarKwp,
+        },
+        tz
+      );
+      if (byHour.size > 0) {
+        let count = 0;
+        for (const [key, wh] of byHour) {
+          const hourStart = new Date(key);
+          await prisma.solarForecast.upsert({
+            where: { hourStart },
+            create: { hourStart, expectedWh: wh },
+            update: { expectedWh: wh, fetchedAt: new Date() },
+          });
+          count++;
+        }
+        return { ok: true, count };
+      }
+    } catch (e) {
+      // Down or rate-limited — log it (nothing else will) and fall through to the
+      // measured-history estimate rather than leaving the forecast stale.
+      console.error("[refresh] Forecast.Solar failed, falling back to history:", (e as Error).message);
+    }
+  }
+
+  try {
+    return { ok: true, count: await estimateSolarFromHistory(tz) };
   } catch (e) {
     return { ok: false, count: 0, error: (e as Error).message };
   }
 }
 
-/** Samples older than this are of no use to the controller's median window. */
-const POWER_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
+/**
+ * How long to keep power samples. Three things need this data to reach back far enough:
+ * the controller's median window (last few minutes), the dashboard timeline
+ * (`historyDays` days, or the oldest shown day loses its data mid-day as the rolling
+ * cutoff sweeps across it), and refreshSolar()'s history-based estimate (see
+ * SOLAR_HISTORY_LOOKBACK_DAYS above refreshSolar, which needs the longest reach of the
+ * three). +1 day of slack absorbs the local-time offset against this UTC cutoff.
+ */
+function powerRetentionMs(historyDays: number): number {
+  return Math.max(historyDays + 1, SOLAR_HISTORY_LOOKBACK_DAYS) * 24 * 60 * 60 * 1000;
+}
 
 /** Read one entity's state as a number; null when unset, missing or unreadable. */
 async function readWatts(entityId: string | undefined): Promise<number | null> {
@@ -181,7 +266,7 @@ export async function refreshPowerSample(): Promise<RefreshResult["power"]> {
     }
     await prisma.powerReading.create({ data: { watts, chargerWatts, pvWatts } });
     await prisma.powerReading.deleteMany({
-      where: { at: { lt: new Date(Date.now() - POWER_RETENTION_MS) } },
+      where: { at: { lt: new Date(Date.now() - powerRetentionMs(settings.historyDays)) } },
     });
     return { ok: true, count: 1 };
   } catch (e) {
@@ -310,15 +395,25 @@ export async function refreshChargerConnected(): Promise<RefreshResult["chargerC
 }
 
 export async function refreshAll(): Promise<RefreshResult> {
-  const [prices, solar, power, carSoc, chargerConnected] = await Promise.all([
-    refreshPrices(),
-    refreshSolar(),
-    refreshPowerSample(),
-    refreshCarSoc(),
-    refreshChargerConnected(),
-  ]);
+  const result: RefreshResult = await (async () => {
+    const [prices, solar, power, carSoc, chargerConnected] = await Promise.all([
+      refreshPrices(),
+      refreshSolar(),
+      refreshPowerSample(),
+      refreshCarSoc(),
+      refreshChargerConnected(),
+    ]);
+    return { prices, solar, power, carSoc, chargerConnected };
+  })();
+  // Each source isolates its own failure so one bad fetch can't block the rest, but that
+  // also means a source silently failing tick after tick (e.g. a rate-limited or
+  // misconfigured forecast fetch) would otherwise never show up anywhere. Log it here,
+  // once, in the one place every refresh path funnels through.
+  for (const [name, r] of Object.entries(result)) {
+    if (!r.ok) console.error(`[refresh] ${name} failed:`, r.error);
+  }
   // Recompute the plan against the freshest data.
   const { recomputePlan } = await import("./plan");
   await recomputePlan().catch(() => undefined);
-  return { prices, solar, power, carSoc, chargerConnected };
+  return result;
 }

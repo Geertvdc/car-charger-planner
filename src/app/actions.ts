@@ -57,6 +57,9 @@ export async function saveSettings(formData: FormData) {
       latitude: num(formData.get("latitude"), 52.37),
       longitude: num(formData.get("longitude"), 4.9),
       timezone: str(formData.get("timezone"), "Europe/Amsterdam"),
+      solarKwp: Math.max(0, num(formData.get("solarKwp"), 0)),
+      solarTilt: Math.max(0, Math.min(90, Math.round(num(formData.get("solarTilt"), 35)))),
+      solarAzimuth: Math.max(-180, Math.min(180, Math.round(num(formData.get("solarAzimuth"), 0)))),
       energyTaxPerKwh: num(formData.get("energyTaxPerKwh")),
       supplierFeePerKwh: num(formData.get("supplierFeePerKwh")),
       vatRate: num(formData.get("vatRate")),
@@ -113,23 +116,6 @@ export async function saveCar(formData: FormData) {
     },
   });
   await recomputePlan().catch(() => undefined);
-  await revalidateAll();
-}
-
-// ---- PV strings ----
-export async function addPv(formData: FormData) {
-  await prisma.pvString.create({
-    data: {
-      name: str(formData.get("name"), "PV"),
-      kwp: num(formData.get("kwp"), 3),
-      tilt: Math.round(num(formData.get("tilt"), 35)),
-      azimuth: Math.round(num(formData.get("azimuth"), 0)),
-    },
-  });
-  await revalidateAll();
-}
-export async function deletePv(formData: FormData) {
-  await prisma.pvString.delete({ where: { id: num(formData.get("id")) } });
   await revalidateAll();
 }
 

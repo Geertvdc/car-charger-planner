@@ -36,12 +36,6 @@ async function main() {
   await prisma.carConfig.upsert({ where: { id: 1 }, update: {}, create: { id: 1 } });
   await prisma.planState.upsert({ where: { id: 1 }, update: {}, create: { id: 1 } });
 
-  if ((await prisma.pvString.count()) === 0) {
-    await prisma.pvString.create({
-      data: { name: "Roof", kwp: 4.0, tilt: 35, azimuth: 0 },
-    });
-  }
-
   if ((await prisma.carState.count()) === 0) {
     await prisma.carState.create({ data: { soc: 50, source: "manual" } });
   }

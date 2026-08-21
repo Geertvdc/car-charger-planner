@@ -2,7 +2,7 @@ import { floorToHour, parseNaiveLocal } from "./time";
 
 const BASE = "https://api.forecast.solar/estimate";
 
-export interface PvStringInput {
+export interface SolarConfig {
   lat: number;
   lon: number;
   tilt: number; // declination degrees
@@ -11,14 +11,11 @@ export interface PvStringInput {
 }
 
 /**
- * Fetch a PV production forecast for one string, bucketed into UTC hours (Wh).
- * Forecast.Solar free tier: no key, rate-limited. Timestamps are local wall-clock
- * for the site's coordinates, which we interpret in the configured tz.
+ * Fetch a PV production forecast for one simplified, whole-roof string, bucketed into
+ * UTC hours (Wh). Forecast.Solar free tier: no key, rate-limited to 12 requests/hour per
+ * IP — one string keeps a normal 30-min refresh well under that.
  */
-export async function fetchForecastSolarString(
-  s: PvStringInput,
-  tz: string
-): Promise<Map<number, number>> {
+export async function fetchForecastSolar(s: SolarConfig, tz: string): Promise<Map<number, number>> {
   const url = `${BASE}/${s.lat}/${s.lon}/${s.tilt}/${s.azimuth}/${s.kwp}`;
   const res = await fetch(url, {
     headers: { Accept: "application/json" },

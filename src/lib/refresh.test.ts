@@ -3,17 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const settingsFindUniqueOrThrow = vi.fn();
 const powerReadingCreate = vi.fn();
 const powerReadingDeleteMany = vi.fn();
+const powerReadingFindMany = vi.fn();
 const carStateFindFirst = vi.fn();
 const carStateCreate = vi.fn();
 const planStateUpdate = vi.fn();
 const priceSnapshotCount = vi.fn();
 const priceSnapshotUpsert = vi.fn();
+const solarForecastUpsert = vi.fn();
 vi.mock("./db", () => ({
   prisma: {
     settings: { findUniqueOrThrow: (...args: unknown[]) => settingsFindUniqueOrThrow(...args) },
     powerReading: {
       create: (...args: unknown[]) => powerReadingCreate(...args),
       deleteMany: (...args: unknown[]) => powerReadingDeleteMany(...args),
+      findMany: (...args: unknown[]) => powerReadingFindMany(...args),
     },
     carState: {
       findFirst: (...args: unknown[]) => carStateFindFirst(...args),
@@ -23,6 +26,9 @@ vi.mock("./db", () => ({
     priceSnapshot: {
       count: (...args: unknown[]) => priceSnapshotCount(...args),
       upsert: (...args: unknown[]) => priceSnapshotUpsert(...args),
+    },
+    solarForecast: {
+      upsert: (...args: unknown[]) => solarForecastUpsert(...args),
     },
   },
 }));
@@ -37,6 +43,19 @@ vi.mock("./energyzero", () => ({
   fetchEnergyZeroDay: (...args: unknown[]) => fetchEnergyZeroDay(...args),
 }));
 
+// Empty by default so refreshPrices() falls through to the EnergyZero mock above,
+// matching all the existing backfill/error tests below. Tests exercising Nordpool
+// itself override this per-case.
+const fetchNordpoolDay = vi.fn().mockResolvedValue([]);
+vi.mock("./nordpool", () => ({
+  fetchNordpoolDay: (...args: unknown[]) => fetchNordpoolDay(...args),
+}));
+
+const fetchForecastSolar = vi.fn();
+vi.mock("./forecastsolar", () => ({
+  fetchForecastSolar: (...args: unknown[]) => fetchForecastSolar(...args),
+}));
+
 import {
   __resetPriceBackfillCache,
   interpretConnectedState,
@@ -44,6 +63,7 @@ import {
   refreshChargerConnected,
   refreshPowerSample,
   refreshPrices,
+  refreshSolar,
 } from "./refresh";
 
 describe("refreshPowerSample", () => {
@@ -106,10 +126,48 @@ describe("refreshPowerSample", () => {
   });
 
   it("prunes samples older than the retention window", async () => {
-    settingsFindUniqueOrThrow.mockResolvedValue({ haPowerSensorEntityId: "sensor.grid" });
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      historyDays: 3,
+    });
     getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
     await refreshPowerSample();
     expect(powerReadingDeleteMany).toHaveBeenCalled();
+  });
+
+  it("keeps retention at least as long as the dashboard's history window", async () => {
+    // historyDays=3 means the oldest displayed day is ~3 days back; the retention
+    // cutoff must sit before that, or that day's chart loses its data mid-day as the
+    // cutoff sweeps across it — it must not be pinned to a fixed short window.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      historyDays: 5,
+    });
+    getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
+    await refreshPowerSample();
+    const cutoff = (powerReadingDeleteMany.mock.calls[0][0] as { where: { at: { lt: Date } } })
+      .where.at.lt;
+    expect(cutoff.getTime()).toBeLessThanOrEqual(new Date("2026-08-16T12:00:00Z").getTime());
+    vi.useRealTimers();
+  });
+
+  it("keeps retention at least as long as refreshSolar()'s history lookback, even with a short historyDays", async () => {
+    // historyDays=1 alone would only need 2 days, but refreshSolar() averages over a
+    // wider window (14 days) to estimate production — retention must cover that too.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      historyDays: 1,
+    });
+    getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
+    await refreshPowerSample();
+    const cutoff = (powerReadingDeleteMany.mock.calls[0][0] as { where: { at: { lt: Date } } })
+      .where.at.lt;
+    expect(cutoff.getTime()).toBeLessThanOrEqual(new Date("2026-08-07T12:00:00Z").getTime());
+    vi.useRealTimers();
   });
 
   it("fails gracefully on a non-numeric HA state (e.g. 'unavailable')", async () => {
@@ -130,6 +188,108 @@ describe("refreshPowerSample", () => {
     getEntityState.mockRejectedValue(new Error("fetch failed"));
     const result = await refreshPowerSample();
     expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
+  });
+});
+
+describe("refreshSolar", () => {
+  const TZ = "Europe/Amsterdam";
+  const NOW = new Date("2026-08-09T10:00:00Z"); // 12:00 local (CEST, UTC+2)
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    settingsFindUniqueOrThrow.mockReset().mockResolvedValue({ timezone: TZ, solarKwp: 0 });
+    powerReadingFindMany.mockReset().mockResolvedValue([]);
+    solarForecastUpsert.mockReset().mockResolvedValue({});
+    // Empty by default so tests that don't set solarKwp fall straight through to the
+    // history estimate below, unaffected by this mock.
+    fetchForecastSolar.mockReset().mockResolvedValue(new Map());
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("no-ops when there's no measured PV history yet", async () => {
+    const result = await refreshSolar();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(solarForecastUpsert).not.toHaveBeenCalled();
+  });
+
+  it("skips Forecast.Solar entirely when solarKwp is unset", async () => {
+    await refreshSolar();
+    expect(fetchForecastSolar).not.toHaveBeenCalled();
+  });
+
+  it("uses Forecast.Solar when solarKwp is configured, in preference to history", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      timezone: TZ,
+      latitude: 52.37,
+      longitude: 4.9,
+      solarKwp: 10.18,
+      solarTilt: 10,
+      solarAzimuth: -106,
+    });
+    fetchForecastSolar.mockResolvedValue(
+      new Map([
+        [new Date("2026-08-09T10:00:00Z").getTime(), 2000],
+        [new Date("2026-08-09T11:00:00Z").getTime(), 2500],
+      ])
+    );
+    const result = await refreshSolar();
+    expect(result).toEqual({ ok: true, count: 2 });
+    expect(fetchForecastSolar).toHaveBeenCalledWith(
+      { lat: 52.37, lon: 4.9, tilt: 10, azimuth: -106, kwp: 10.18 },
+      TZ
+    );
+    // History wasn't even queried — Forecast.Solar covered it.
+    expect(powerReadingFindMany).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the history estimate when Forecast.Solar fails", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ timezone: TZ, solarKwp: 10.18 });
+    fetchForecastSolar.mockRejectedValue(new Error("Forecast.Solar 429"));
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T10:00:00Z"), pvWatts: 3000 },
+    ]);
+    const result = await refreshSolar();
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(2); // today + tomorrow, from history
+  });
+
+  it("averages measured watts by local hour-of-day into today and tomorrow's forecast", async () => {
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T10:00:00Z"), pvWatts: 3000 }, // local 12:00
+      { at: new Date("2026-08-08T10:00:00Z"), pvWatts: 5000 }, // local 12:00
+    ]);
+    const result = await refreshSolar();
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(2); // today + tomorrow, the one hour with history
+    const call = solarForecastUpsert.mock.calls[0][0] as { create: { expectedWh: number } };
+    expect(call.create.expectedWh).toBe(4000); // average of 3000 and 5000
+  });
+
+  it("skips hours with no history rather than writing a false zero", async () => {
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T10:00:00Z"), pvWatts: 3000 }, // only local hour 12 populated
+    ]);
+    await refreshSolar();
+    expect(solarForecastUpsert).toHaveBeenCalledTimes(2); // today + tomorrow, that one hour only
+  });
+
+  it("clamps a negative sensor reading to zero", async () => {
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T02:00:00Z"), pvWatts: -3 }, // nighttime sensor noise
+    ]);
+    await refreshSolar();
+    const call = solarForecastUpsert.mock.calls[0][0] as { create: { expectedWh: number } };
+    expect(call.create.expectedWh).toBe(0);
+  });
+
+  it("returns ok:false without throwing on a DB error", async () => {
+    powerReadingFindMany.mockRejectedValue(new Error("db down"));
+    const result = await refreshSolar();
+    expect(result).toEqual({ ok: false, count: 0, error: "db down" });
   });
 });
 
@@ -342,6 +502,7 @@ describe("refreshPrices backfill", () => {
     priceSnapshotUpsert.mockReset().mockResolvedValue({});
     priceSnapshotCount.mockReset().mockResolvedValue(96); // history complete by default (96 x 15-min slots)
     fetchEnergyZeroDay.mockReset().mockImplementation((d: string) => onePoint(d));
+    fetchNordpoolDay.mockReset().mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -352,6 +513,32 @@ describe("refreshPrices backfill", () => {
     const result = await refreshPrices();
     expect(fetchedDates()).toEqual(["2026-08-09", "2026-08-10"]);
     expect(result.ok).toBe(true);
+  });
+
+  it("prefers Nordpool's real 15-min prices and skips EnergyZero when it succeeds", async () => {
+    fetchNordpoolDay.mockImplementation((d: string) => onePoint(d));
+    const result = await refreshPrices();
+    expect(result.ok).toBe(true);
+    expect(fetchEnergyZeroDay).not.toHaveBeenCalled();
+    expect(fetchNordpoolDay).toHaveBeenCalledWith("2026-08-09");
+    expect(fetchNordpoolDay).toHaveBeenCalledWith("2026-08-10");
+  });
+
+  it("falls back to EnergyZero for a day Nordpool errors on", async () => {
+    fetchNordpoolDay.mockImplementation((d: string) =>
+      d === "2026-08-09" ? Promise.reject(new Error("Nordpool 503")) : onePoint(d)
+    );
+    const result = await refreshPrices();
+    expect(result.ok).toBe(true);
+    expect(fetchedDates()).toEqual(["2026-08-09"]); // only the day Nordpool failed for
+  });
+
+  it("falls back to EnergyZero for a day Nordpool has nothing for yet", async () => {
+    // e.g. tomorrow, before Nordpool's auction has published.
+    fetchNordpoolDay.mockImplementation((d: string) => (d === "2026-08-10" ? [] : onePoint(d)));
+    const result = await refreshPrices();
+    expect(result.ok).toBe(true);
+    expect(fetchedDates()).toEqual(["2026-08-10"]);
   });
 
   it("backfills a past day that is missing entirely", async () => {

@@ -285,6 +285,9 @@ function DayChart({
           xFor(day.hours.length - 1) + COL / 2
         },${PRICE_BOTTOM} Z`
       : "";
+  // The curve itself, drawn separately from the fill so it can be dashed — dashed reads
+  // as "prediction" at a glance, next to the solid measured line below.
+  const solarLine = solarPts.length > 0 ? `M ${solarPts.join(" L ")}` : "";
 
   // Measured PV trace — the actual sensor reading, overlaid on the forecast area above.
   // Only drawn where a reading exists, so a day with no solar entity configured (or one
@@ -427,9 +430,18 @@ function DayChart({
           );
         })}
 
-        {/* solar area — forecast, from PvString + forecast.solar */}
-        {solarArea && (
-          <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="var(--color-solar)" strokeWidth={1.5} />
+        {/* solar forecast — dashed to read as "prediction" next to the solid measured
+            line below. Area fill has no stroke of its own; solarLine draws the curve. */}
+        {solarArea && <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="none" />}
+        {solarLine && (
+          <path
+            d={solarLine}
+            fill="none"
+            stroke="var(--color-solar)"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            opacity={0.9}
+          />
         )}
 
         {/* measured PV trace — the actual reading from the configured solar entity */}
@@ -651,7 +663,6 @@ function Legend() {
     ["var(--color-cheap)", "cheap"],
     ["var(--color-mid)", "mid"],
     ["var(--color-expensive)", "expensive"],
-    ["var(--color-solar)", "solar (forecast)"],
     ["var(--color-charge)", "charging (target)"],
     ["var(--color-charge-cheap)", "charging (cheap)"],
     ["var(--color-charge-surplus)", "charging (solar surplus)"],
@@ -664,6 +675,13 @@ function Legend() {
       <span className="flex items-center gap-1.5">
         <span className="inline-block h-0.5 w-2.5" style={{ background: "var(--color-solar)" }} /> solar
         (measured)
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span
+          className="inline-block h-0 w-3 border-t-2 border-dashed"
+          style={{ borderColor: "var(--color-solar)" }}
+        />{" "}
+        solar (forecast)
       </span>
       {items.map(([c, l]) => (
         <span key={l} className="flex items-center gap-1.5">

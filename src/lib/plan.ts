@@ -107,7 +107,7 @@ export async function recomputePlan(nowOverride?: Date) {
     if (price == null) continue;
     const dateISO = localDateISO(t, tz);
     const day = await getDay(dateISO);
-    // Solar forecast is hourly only (Forecast.Solar free tier); split its hour's
+    // Solar forecast is hourly only (see refreshSolar() in refresh.ts); split its hour's
     // energy evenly across the four 15-min slots it covers.
     const hourlySolarWh = solarMap.get(floorToHour(t).getTime()) ?? 0;
     hours.push({

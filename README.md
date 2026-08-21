@@ -1,9 +1,10 @@
 # Car Charger Planner
 
 A self-hosted web app that decides **when to charge your EV at home**, optimizing for
-**dynamic energy prices** (EPEX via EnergyZero) and **self-consumed solar**
-(Forecast.Solar), while respecting **when you're actually home** and a **morning
-readiness target** (e.g. "80% by 07:00 on weekdays").
+**dynamic energy prices** (day-ahead via Nordpool, EnergyZero as a fallback) and
+**self-consumed solar** (a weather-aware Forecast.Solar forecast, falling back to your
+own measured production history if that's unavailable), while respecting **when you're
+actually home** and a **morning readiness target** (e.g. "80% by 07:00 on weekdays").
 
 It talks to **Home Assistant** over HA's REST API and drives the charger itself — both
 the on/off decision whenever the plan is (re)computed, and the **charging current**,
@@ -83,9 +84,9 @@ no fixed weekly schedule), use evcc instead.
   only thing that ever calls HA. A planner and a surplus loop both grabbing at the same
   charger switch would be far worse than a slightly stale current limit.
 - **Forecast plans, measurement controls.** The engine schedules from the Forecast.Solar
-  prediction, which is the only thing available for tomorrow. But the decision to charge
-  from surplus *right now* is made from the measured grid reading — a forecast is not
-  allowed to switch the charger on by itself.
+  prediction, the only thing available for tomorrow. But the decision to charge from
+  surplus *right now* is made from the measured grid reading — a forecast is not allowed
+  to switch the charger on by itself.
 - **Home/away is a first-class weekly schedule, not a toggle.** A weekly template
   (per-weekday home windows + a morning deadline/target) plus per-date overrides for
   days that diverge — because a real week isn't "always home" or "always away".
@@ -232,12 +233,12 @@ docker compose up --build
 ## Configure
 
 1. **Settings** — location (type a place name, e.g. "Uden, Netherlands" — it's geocoded
-   to coordinates + timezone; manual lat/lon override available), import price make-up
-   and export price to match your dynamic contract, solar-usable factor, solar surplus
-   charging, and Home Assistant connection (see below).
-2. **Car & solar** — battery kWh, charger kW, efficiency, and the charger's electrical
-   limits (phases, voltage, min/max current); one PV string per roof plane. Get the PV
-   kWp right — an undersized array means no surplus slots ever get planned.
+   to coordinates + timezone; manual lat/lon override available), a Solar forecast kWp/
+   tilt/azimuth (one simplified angle for the whole roof — doesn't need to be exact),
+   import price make-up and export price to match your dynamic contract, solar-usable
+   factor, solar surplus charging, and Home Assistant connection (see below).
+2. **Car** — battery kWh, charger kW, efficiency, and the charger's electrical limits
+   (phases, voltage, min/max current).
 3. **Weekly schedule** — home windows (simple home/away) + morning target % per
    weekday.
 4. **Upcoming days** — diverge from the template on specific dates (or mark "away").
@@ -316,11 +317,12 @@ following the **measured** grid meter rather than a forecast. Enable it under
   `{entity_id, <value key>: amps}` via a configurable service (default
   `number.set_value`), so an integration with a different payload shape works too.
 
-Optionally set a **Solar production entity ID** — shown on the timeline, not used by
-the control loop.
+Optionally set a **Solar production entity ID** — shown on the timeline, and used as the
+solar forecast's fallback (see "Notes / roadmap" below) if Forecast.Solar is unavailable.
+Not used by the control loop itself.
 
-Then set the charger's electrical envelope under **Car & solar → Electrical limits**
-(phases, voltage, min/max current). This is what converts watts into amps:
+Then set the charger's electrical envelope under **Car → Electrical limits** (phases,
+voltage, min/max current). This is what converts watts into amps:
 `A = W ÷ (phases × voltage)`.
 
 **How it behaves.** A sample is taken every 30 s. Each decision uses the **median** of
@@ -485,8 +487,12 @@ src/
     ha-control.ts         applyChargeCommand() — diffs desired vs. last-pushed state,
                            calls HA only on change; on/off throttled to 1/min, current
                            to 1 per 5 min; records PlanState.haSync*/ampsSync*
-    energyzero.ts         EPEX day-ahead price fetch (EnergyZero API)
-    forecastsolar.ts      PV production forecast (Forecast.Solar API), per PV string
+    nordpool.ts           EPEX day-ahead price fetch, real 15-min resolution (Nordpool)
+    energyzero.ts         EPEX day-ahead price fetch (EnergyZero), Nordpool's fallback —
+                           only has hourly resolution
+    forecastsolar.ts      PV production forecast, one simplified whole-roof string
+                           (Forecast.Solar API); refreshSolar() falls back to a measured-
+                           history estimate if this fails or isn't configured
     geocode.ts             Place name -> lat/lon/timezone (Open-Meteo)
     availability.ts         Weekly template + day overrides -> home/away per hour
     pricing.ts, time.ts, now.ts   Import + export price calc, timezone-aware date
@@ -538,12 +544,18 @@ npm test      # engine, surplus control, pricing, availability, refresh, HA clie
 
 ## Notes / roadmap
 
-- Historical prices accumulate as the app runs (EnergyZero serves today + tomorrow).
-- **Get your PV string sizes right.** The planner's solar forecast comes from
-  Forecast.Solar and is only as good as the kWp/tilt/azimuth you enter under
-  **Car & solar**. An undersized array means forecast surplus never clears the charger's
-  minimum current and no surplus slots get planned at all. (The live control loop is
-  immune — it uses measured power — but the plan and timeline will be wrong.)
+- Historical prices accumulate as the app runs (Nordpool/EnergyZero serve today +
+  tomorrow).
+- **Solar forecast.** Settings → Solar forecast takes one simplified kWp/tilt/azimuth
+  for your *whole* roof, not a per-string model — good enough for a weather-aware
+  forecast without an exact panel-by-panel geometry survey (Forecast.Solar's free tier
+  is also rate-limited to 12 requests/hour, so a single string matters if you refresh
+  often). Leave kWp at 0, or if the call ever fails, and it falls back to averaging
+  **Solar production**'s own measured history by hour-of-day over the last two weeks
+  instead — not weather-aware, but needs no configuration and never rate-limits. A
+  brand-new setup with neither configured has no forecast yet, only the measured trace.
+  (The live control loop is unaffected either way — it uses measured power, not the
+  forecast.)
 - **No 1/3-phase switching.** On 3 phases the 6 A floor puts the minimum charge at
   ~4.1 kW, so surplus charging can't use a weak solar day. Dropping to single phase
   would extend that down to ~1.4 kW; on Zaptec it means the installation-level
