@@ -58,6 +58,21 @@ export default async function SettingsPage() {
         </section>
 
         <section>
+          <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">Solar forecast</h2>
+          <p className="mb-2 text-xs text-[var(--color-muted)]">
+            One simplified angle for your whole roof (not per-string) — a weather-aware forecast
+            via Forecast.Solar, one API call per refresh. kWp 0 disables it, falling back to an
+            estimate from <strong>Solar production</strong>&apos;s own measured history below.
+            Azimuth: 0 = south, −90 = east, 90 = west.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field label="kWp (0 = off)" name="solarKwp" defaultValue={s.solarKwp} step="0.1" />
+            <Field label="Tilt°" name="solarTilt" defaultValue={s.solarTilt} step="1" />
+            <Field label="Azimuth°" name="solarAzimuth" defaultValue={s.solarAzimuth} step="1" />
+          </div>
+        </section>
+
+        <section>
           <h2 className="mb-2 text-sm font-semibold text-[var(--color-accent)]">
             Price make-up (EUR/kWh)
           </h2>
@@ -300,8 +315,9 @@ export default async function SettingsPage() {
             exporting. <strong>Charger power</strong> is required: the grid reading already includes
             the car, so without it the controller would mistake its own draw for household demand
             and throttle itself to nothing. <strong>Solar production</strong> is optional, shown on
-            the timeline, and is also what the solar forecast is estimated from — leave it unset and
-            there's no forecast, just the measured trace.
+            the timeline, and backs up the solar forecast (Settings → Solar forecast above) when that
+            call fails or its kWp is left at 0 — leave both unset and there's no forecast, just the
+            measured trace.
           </p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field

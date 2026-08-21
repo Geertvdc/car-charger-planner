@@ -1,10 +1,10 @@
 # Car Charger Planner
 
 Plans EV charging around Dutch dynamic energy prices (day-ahead via Nordpool, with
-EnergyZero as a fallback), a solar production forecast estimated from your own measured
-history and your weekly home/away schedule, then starts and stops the charger through
-Home Assistant so the car hits its target state of charge by your morning deadline — as
-cheaply as possible.
+EnergyZero as a fallback), a weather-aware solar production forecast (Forecast.Solar) and
+your weekly home/away schedule, then starts and stops the charger through Home Assistant
+so the car hits its target state of charge by your morning deadline — as cheaply as
+possible.
 
 ## Installation
 
@@ -25,7 +25,8 @@ Open the panel and work through these once:
 | **Settings** → Location | Your town — geocoded to coordinates and timezone. |
 | **Settings** → Price make-up | Energy tax, supplier fee and VAT, so prices match your contract (Tibber, Frank, Zonneplan, …). |
 | **Settings** → Charger control | The charger's switch entity. The entity fields suggest live entities read from your Home Assistant. |
-| **Settings** → Solar production entity | Your solar inverter's power sensor. The solar forecast is estimated from its measured history — no panel geometry to configure. |
+| **Settings** → Solar forecast | One simplified kWp/tilt/azimuth for your whole roof — doesn't need to be exact, just roughly representative. |
+| **Settings** → Solar production entity | Your solar inverter's power sensor, shown on the timeline and used as a fallback forecast if the above is left unset. |
 | **Car** | Battery size, charger power, min/max SoC, and the electrical limits used to turn surplus watts into a charger current. |
 | **Weekly schedule** | Per weekday: the deadline time, target SoC, and the hours the car is home. |
 

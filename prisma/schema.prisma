@@ -18,6 +18,14 @@ model Settings {
   latitude           Float    @default(52.37)
   longitude          Float    @default(4.90)
   timezone           String   @default("Europe/Amsterdam")
+  // --- Solar forecast (Forecast.Solar, one simplified string for the whole roof) ---
+  // A single representative angle, not a precise per-string model: good enough for a
+  // weather-aware forecast without needing an exact panel-by-panel geometry survey. See
+  // refreshSolar() in refresh.ts, which falls back to a measured-history estimate if
+  // this call fails or kwp is unset (0).
+  solarKwp           Float    @default(0)
+  solarTilt          Int      @default(35) // declination degrees, 0=horizontal, 90=vertical
+  solarAzimuth       Int      @default(0)  // -180..180, 0=south, -90=east, 90=west
   // All-in price = rawEpex + energyTaxPerKwh + supplierFeePerKwh, then * (1 + vatRate)
   energyTaxPerKwh    Float    @default(0.1088)
   supplierFeePerKwh  Float    @default(0.02)
@@ -76,7 +84,9 @@ model Settings {
   // added back out to find the true household surplus.
   haChargerPowerEntityId   String @default("")
   // Optional PV production sensor, e.g. sensor.envoy_..._current_energy_production (W).
-  // Display/diagnostics only — the controller works off grid + charger power alone.
+  // The controller works off grid + charger power alone, so this is display only for it
+  // — but it's also refreshSolar()'s fallback estimate source when the Forecast.Solar
+  // call fails (a trailing 14-day, hour-of-day average of this sensor's history).
   haSolarPowerEntityId     String @default("")
   // Car SoC % sensor read via HA (e.g. the EU Data Act portal integration for Cupra/VW
   // Group cars). Read-only, feeds CarState with source "ha_car" — see refreshCarSoc().

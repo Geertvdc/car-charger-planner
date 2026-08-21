@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { fetchEnergyZeroDay, RawPricePoint } from "./energyzero";
+import { fetchForecastSolar } from "./forecastsolar";
 import { getEntityState } from "./ha-client";
 import { fetchNordpoolDay } from "./nordpool";
 import { allInPrice, feedInPrice } from "./pricing";
@@ -118,60 +119,97 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
 }
 
 /**
- * How many days of measured PV to average, by local hour-of-day, when estimating the
- * next day's production. Wide enough to smooth out day-to-day weather noise; narrow
- * enough to still track the season as day length shifts week to week.
- *
- * Deliberately not a physical model: no panel geometry, no external API, no rate limit.
- * Just "what did this system actually do at this hour recently" — which already reflects
- * whatever your roof's real orientation, tilt and shading do, without needing anyone to
- * describe them (and get tilt/azimuth/kWp wrong in the process).
+ * How many days of measured PV to average, by local hour-of-day, for the fallback
+ * estimate below. Wide enough to smooth out day-to-day weather noise; narrow enough to
+ * still track the season as day length shifts week to week.
  */
 const SOLAR_HISTORY_LOOKBACK_DAYS = 14;
+
+/**
+ * Fallback when Forecast.Solar fails or isn't configured (solarKwp unset): a trailing
+ * 14-day, hour-of-day average of measured PV. Not weather-aware, but needs no panel
+ * geometry, no external API and hits no rate limit — better than no forecast at all.
+ */
+async function estimateSolarFromHistory(tz: string): Promise<number> {
+  const since = new Date(Date.now() - SOLAR_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const readings = await prisma.powerReading.findMany({
+    where: { at: { gte: since }, pvWatts: { not: null } },
+    select: { at: true, pvWatts: true },
+  });
+  if (readings.length === 0) return 0;
+
+  // Average measured watts by local hour-of-day across the whole lookback window.
+  // A 1-hour bucket's average watts numerically equals its Wh, matching what
+  // SolarForecast.expectedWh has always meant.
+  const byHour = new Map<number, { sum: number; count: number }>();
+  for (const r of readings) {
+    const hour = localHour(r.at, tz);
+    const bucket = byHour.get(hour) ?? { sum: 0, count: 0 };
+    bucket.sum += r.pvWatts as number;
+    bucket.count += 1;
+    byHour.set(hour, bucket);
+  }
+
+  const today = todayISO(tz);
+  const tomorrow = addDaysISO(today, 1);
+  let count = 0;
+  for (const dateISO of [today, tomorrow]) {
+    for (let hour = 0; hour < 24; hour++) {
+      const bucket = byHour.get(hour);
+      // No history for this hour yet (e.g. a brand-new install) — leave it unset
+      // rather than writing a false zero.
+      if (!bucket) continue;
+      const expectedWh = Math.max(0, bucket.sum / bucket.count);
+      const hourStart = localTimeToUTC(dateISO, `${String(hour).padStart(2, "0")}:00`, tz);
+      await prisma.solarForecast.upsert({
+        where: { hourStart },
+        create: { hourStart, expectedWh },
+        update: { expectedWh, fetchedAt: new Date() },
+      });
+      count++;
+    }
+  }
+  return count;
+}
 
 export async function refreshSolar(): Promise<RefreshResult["solar"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const tz = settings.timezone;
-  try {
-    const since = new Date(Date.now() - SOLAR_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-    const readings = await prisma.powerReading.findMany({
-      where: { at: { gte: since }, pvWatts: { not: null } },
-      select: { at: true, pvWatts: true },
-    });
-    if (readings.length === 0) return { ok: true, count: 0 };
 
-    // Average measured watts by local hour-of-day across the whole lookback window.
-    // A 1-hour bucket's average watts numerically equals its Wh, matching what
-    // SolarForecast.expectedWh has always meant.
-    const byHour = new Map<number, { sum: number; count: number }>();
-    for (const r of readings) {
-      const hour = localHour(r.at, tz);
-      const bucket = byHour.get(hour) ?? { sum: 0, count: 0 };
-      bucket.sum += r.pvWatts as number;
-      bucket.count += 1;
-      byHour.set(hour, bucket);
-    }
-
-    const today = todayISO(tz);
-    const tomorrow = addDaysISO(today, 1);
-    let count = 0;
-    for (const dateISO of [today, tomorrow]) {
-      for (let hour = 0; hour < 24; hour++) {
-        const bucket = byHour.get(hour);
-        // No history for this hour yet (e.g. a brand-new install) — leave it unset
-        // rather than writing a false zero.
-        if (!bucket) continue;
-        const expectedWh = Math.max(0, bucket.sum / bucket.count);
-        const hourStart = localTimeToUTC(dateISO, `${String(hour).padStart(2, "0")}:00`, tz);
-        await prisma.solarForecast.upsert({
-          where: { hourStart },
-          create: { hourStart, expectedWh },
-          update: { expectedWh, fetchedAt: new Date() },
-        });
-        count++;
+  if (settings.solarKwp > 0) {
+    try {
+      const byHour = await fetchForecastSolar(
+        {
+          lat: settings.latitude,
+          lon: settings.longitude,
+          tilt: settings.solarTilt,
+          azimuth: settings.solarAzimuth,
+          kwp: settings.solarKwp,
+        },
+        tz
+      );
+      if (byHour.size > 0) {
+        let count = 0;
+        for (const [key, wh] of byHour) {
+          const hourStart = new Date(key);
+          await prisma.solarForecast.upsert({
+            where: { hourStart },
+            create: { hourStart, expectedWh: wh },
+            update: { expectedWh: wh, fetchedAt: new Date() },
+          });
+          count++;
+        }
+        return { ok: true, count };
       }
+    } catch (e) {
+      // Down or rate-limited — log it (nothing else will) and fall through to the
+      // measured-history estimate rather than leaving the forecast stale.
+      console.error("[refresh] Forecast.Solar failed, falling back to history:", (e as Error).message);
     }
-    return { ok: true, count };
+  }
+
+  try {
+    return { ok: true, count: await estimateSolarFromHistory(tz) };
   } catch (e) {
     return { ok: false, count: 0, error: (e as Error).message };
   }

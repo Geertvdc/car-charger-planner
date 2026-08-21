@@ -51,6 +51,11 @@ vi.mock("./nordpool", () => ({
   fetchNordpoolDay: (...args: unknown[]) => fetchNordpoolDay(...args),
 }));
 
+const fetchForecastSolar = vi.fn();
+vi.mock("./forecastsolar", () => ({
+  fetchForecastSolar: (...args: unknown[]) => fetchForecastSolar(...args),
+}));
+
 import {
   __resetPriceBackfillCache,
   interpretConnectedState,
@@ -193,9 +198,12 @@ describe("refreshSolar", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    settingsFindUniqueOrThrow.mockReset().mockResolvedValue({ timezone: TZ });
+    settingsFindUniqueOrThrow.mockReset().mockResolvedValue({ timezone: TZ, solarKwp: 0 });
     powerReadingFindMany.mockReset().mockResolvedValue([]);
     solarForecastUpsert.mockReset().mockResolvedValue({});
+    // Empty by default so tests that don't set solarKwp fall straight through to the
+    // history estimate below, unaffected by this mock.
+    fetchForecastSolar.mockReset().mockResolvedValue(new Map());
   });
 
   afterEach(() => {
@@ -206,6 +214,47 @@ describe("refreshSolar", () => {
     const result = await refreshSolar();
     expect(result).toEqual({ ok: true, count: 0 });
     expect(solarForecastUpsert).not.toHaveBeenCalled();
+  });
+
+  it("skips Forecast.Solar entirely when solarKwp is unset", async () => {
+    await refreshSolar();
+    expect(fetchForecastSolar).not.toHaveBeenCalled();
+  });
+
+  it("uses Forecast.Solar when solarKwp is configured, in preference to history", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      timezone: TZ,
+      latitude: 52.37,
+      longitude: 4.9,
+      solarKwp: 10.18,
+      solarTilt: 10,
+      solarAzimuth: -106,
+    });
+    fetchForecastSolar.mockResolvedValue(
+      new Map([
+        [new Date("2026-08-09T10:00:00Z").getTime(), 2000],
+        [new Date("2026-08-09T11:00:00Z").getTime(), 2500],
+      ])
+    );
+    const result = await refreshSolar();
+    expect(result).toEqual({ ok: true, count: 2 });
+    expect(fetchForecastSolar).toHaveBeenCalledWith(
+      { lat: 52.37, lon: 4.9, tilt: 10, azimuth: -106, kwp: 10.18 },
+      TZ
+    );
+    // History wasn't even queried — Forecast.Solar covered it.
+    expect(powerReadingFindMany).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the history estimate when Forecast.Solar fails", async () => {
+    settingsFindUniqueOrThrow.mockResolvedValue({ timezone: TZ, solarKwp: 10.18 });
+    fetchForecastSolar.mockRejectedValue(new Error("Forecast.Solar 429"));
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T10:00:00Z"), pvWatts: 3000 },
+    ]);
+    const result = await refreshSolar();
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(2); // today + tomorrow, from history
   });
 
   it("averages measured watts by local hour-of-day into today and tomorrow's forecast", async () => {
