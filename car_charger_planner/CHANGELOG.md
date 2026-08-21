@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.3
+
+- **Day-ahead prices are now real 15-minute values**, not an hourly price repeated four
+  times. Prices come from Nordpool's public day-ahead data, which genuinely settles the
+  NL auction at quarter-hour resolution; EnergyZero (still hourly only) is kept as a
+  fallback if Nordpool is ever unreachable.
+- **Solar forecast overhauled.** Settings → Solar forecast now takes one simplified kWp/
+  tilt/azimuth for your whole roof (not a precise per-string model) and gets a real,
+  weather-aware forecast from Forecast.Solar — one API call per refresh, well under its
+  rate limit. If that call fails, or kWp is left at 0, it falls back to averaging your
+  own measured solar production by hour-of-day over the last two weeks, so there's always
+  a forecast rather than a hard failure. The old per-string PV configuration (tilt/
+  azimuth/kWp per roof plane) is gone.
+- The forecast curve is now drawn dashed, distinct from the solid measured-production
+  line, so it reads as "prediction" at a glance.
+- Fixed a deadline/target charging slot commanding the charger on even with no car
+  connected — the connected check only ran for solar-surplus decisions, so a plan slot
+  could log a charge that never physically happened.
+- Fixed measured power-reading retention being shorter than the dashboard's history
+  window, which cut off the oldest displayed day's graphs partway through.
+- Refresh failures for any single data source (prices, solar, power, car SoC, charger
+  connection) are now logged instead of silently swallowed.
+
 ## 0.3.2
 
 - Fixed a deadline/target charging slot commanding the charger on even with no car

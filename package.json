@@ -1,6 +1,6 @@
 {
   "name": "car-charger-planner",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Self-hosted planner that charges your EV on cheap dynamic-price/solar hours while meeting a morning readiness target, respecting a weekly home/away schedule, and controlling the charger via Home Assistant.",
   "license": "MIT",
