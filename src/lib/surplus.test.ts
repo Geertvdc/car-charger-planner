@@ -131,6 +131,18 @@ describe("resolveChargeCommand", () => {
     expect(c.amps).toBe(16);
   });
 
+  it("refuses to run the plan when no car is connected", () => {
+    // A deadline slot wants full power, but there's nothing plugged in to receive it.
+    const c = resolveChargeCommand({
+      ...base,
+      planOn: true,
+      connected: false,
+      samples: samples(2000, 0),
+    });
+    expect(c.on).toBe(false);
+    expect(c.mode).toBe("off");
+  });
+
   it("keeps the hysteresis clock running while the plan is in charge", () => {
     // So a handover to surplus can happen the moment the plan slot ends.
     const c = resolveChargeCommand({

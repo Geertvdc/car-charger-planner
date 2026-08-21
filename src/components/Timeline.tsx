@@ -90,6 +90,9 @@ export default function Timeline({ data }: { data: TimelineData }) {
           minP = Math.min(minP, h.allInPrice);
         }
         maxS = Math.max(maxS, h.solarWh);
+        // Measured PV is watts, not per-slot Wh; /4 converts a 15-min average into the
+        // same per-slot-Wh scale the forecast area uses, so both can share one axis.
+        if (h.pvWatts != null) maxS = Math.max(maxS, h.pvWatts / 4);
         // One shared symmetric scale across every day, so a dip below the zero line
         // means the same amount of export wherever you look.
         if (h.gridWatts != null) maxG = Math.max(maxG, Math.abs(h.gridWatts));
@@ -283,6 +286,18 @@ function DayChart({
         },${PRICE_BOTTOM} Z`
       : "";
 
+  // Measured PV trace — the actual sensor reading, overlaid on the forecast area above.
+  // Only drawn where a reading exists, so a day with no solar entity configured (or one
+  // that hasn't reported yet) shows just the forecast, not a line pinned to zero.
+  const pvPts = day.hours.map((h, i) => ({
+    x: xFor(i) + COL / 2,
+    y: h.pvWatts != null ? PRICE_BOTTOM - (Math.min(maxSolar, h.pvWatts / 4) / maxSolar) * PRICE_H : null,
+  }));
+  const pvPath = (() => {
+    const seg = pvPts.filter((p): p is { x: number; y: number } => p.y != null);
+    return seg.length < 2 ? "" : `M ${seg.map((p) => `${p.x},${p.y}`).join(" L ")}`;
+  })();
+
   // --- Net grid power trace ---
   // Zero sits below the middle of the price panel so exports have room to swing down
   // without the trace colliding with the tall price bars at the top.
@@ -412,10 +427,13 @@ function DayChart({
           );
         })}
 
-        {/* solar area */}
+        {/* solar area — forecast, from PvString + forecast.solar */}
         {solarArea && (
           <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="var(--color-solar)" strokeWidth={1.5} />
         )}
+
+        {/* measured PV trace — the actual reading from the configured solar entity */}
+        {pvPath && <path d={pvPath} fill="none" stroke="var(--color-solar)" strokeWidth={1.8} opacity={0.95} />}
 
         {/* net grid power — the direct read on "am I exporting right now". Measured
             (solid) for slots we have samples for, forecast (dashed) ahead of now. The
@@ -633,7 +651,7 @@ function Legend() {
     ["var(--color-cheap)", "cheap"],
     ["var(--color-mid)", "mid"],
     ["var(--color-expensive)", "expensive"],
-    ["var(--color-solar)", "solar"],
+    ["var(--color-solar)", "solar (forecast)"],
     ["var(--color-charge)", "charging (target)"],
     ["var(--color-charge-cheap)", "charging (cheap)"],
     ["var(--color-charge-surplus)", "charging (solar surplus)"],
@@ -643,6 +661,10 @@ function Legend() {
   ];
   return (
     <div className="flex flex-wrap gap-4 text-[11px] text-[var(--color-muted)]">
+      <span className="flex items-center gap-1.5">
+        <span className="inline-block h-0.5 w-2.5" style={{ background: "var(--color-solar)" }} /> solar
+        (measured)
+      </span>
       {items.map(([c, l]) => (
         <span key={l} className="flex items-center gap-1.5">
           <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c }} />
@@ -679,7 +701,9 @@ function HoverInfo({ hover }: { hover: { h: TimelineHour; day: string } | null }
     <div className="mt-2 h-5 font-mono text-xs text-[var(--color-text)]">
       <span className="font-sans text-[var(--color-muted)]">{day}</span>{" "}
       {String(h.localHour).padStart(2, "0")}:{String(h.localMinute).padStart(2, "0")} · {price} · ☀{" "}
-      {(h.solarWh / 1000).toFixed(2)} kWh{grid} · {h.availability.toLowerCase()}
+      {(h.solarWh / 1000).toFixed(2)} kWh forecast
+      {h.pvWatts != null ? ` (${Math.round(h.pvWatts)} W measured)` : ""}
+      {grid} · {h.availability.toLowerCase()}
       {h.forcedHome ? " (plugged in)" : ""}
       {h.planned
         ? ` · charging ${h.plannedKwh.toFixed(1)} kWh @ ${h.plannedAmps} A (${chargeStyle(h.plannedReason).label})`

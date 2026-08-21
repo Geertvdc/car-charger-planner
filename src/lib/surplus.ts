@@ -137,8 +137,11 @@ export function resolveChargeCommand(input: SurplusInput): ChargeCommand {
   const off = (reason: string) => done(false, minCurrentA, "off", reason);
 
   // 1. A deadline beats the sun. Run at full power and let the grid cover whatever PV
-  //    doesn't — the plan already decided this slot is worth paying for.
+  //    doesn't — the plan already decided this slot is worth paying for. Still requires a
+  //    car to be plugged in: otherwise the log/telemetry would show charging that never
+  //    physically happened.
   if (planOn) {
+    if (!connected) return off("Plan wants to charge, but no car connected.");
     return done(true, clamp(planAmps), "plan", "Charging to meet the plan's target.");
   }
 
