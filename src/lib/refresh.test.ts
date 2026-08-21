@@ -37,6 +37,14 @@ vi.mock("./energyzero", () => ({
   fetchEnergyZeroDay: (...args: unknown[]) => fetchEnergyZeroDay(...args),
 }));
 
+// Empty by default so refreshPrices() falls through to the EnergyZero mock above,
+// matching all the existing backfill/error tests below. Tests exercising Nordpool
+// itself override this per-case.
+const fetchNordpoolDay = vi.fn().mockResolvedValue([]);
+vi.mock("./nordpool", () => ({
+  fetchNordpoolDay: (...args: unknown[]) => fetchNordpoolDay(...args),
+}));
+
 import {
   __resetPriceBackfillCache,
   interpretConnectedState,
@@ -342,6 +350,7 @@ describe("refreshPrices backfill", () => {
     priceSnapshotUpsert.mockReset().mockResolvedValue({});
     priceSnapshotCount.mockReset().mockResolvedValue(96); // history complete by default (96 x 15-min slots)
     fetchEnergyZeroDay.mockReset().mockImplementation((d: string) => onePoint(d));
+    fetchNordpoolDay.mockReset().mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -352,6 +361,32 @@ describe("refreshPrices backfill", () => {
     const result = await refreshPrices();
     expect(fetchedDates()).toEqual(["2026-08-09", "2026-08-10"]);
     expect(result.ok).toBe(true);
+  });
+
+  it("prefers Nordpool's real 15-min prices and skips EnergyZero when it succeeds", async () => {
+    fetchNordpoolDay.mockImplementation((d: string) => onePoint(d));
+    const result = await refreshPrices();
+    expect(result.ok).toBe(true);
+    expect(fetchEnergyZeroDay).not.toHaveBeenCalled();
+    expect(fetchNordpoolDay).toHaveBeenCalledWith("2026-08-09");
+    expect(fetchNordpoolDay).toHaveBeenCalledWith("2026-08-10");
+  });
+
+  it("falls back to EnergyZero for a day Nordpool errors on", async () => {
+    fetchNordpoolDay.mockImplementation((d: string) =>
+      d === "2026-08-09" ? Promise.reject(new Error("Nordpool 503")) : onePoint(d)
+    );
+    const result = await refreshPrices();
+    expect(result.ok).toBe(true);
+    expect(fetchedDates()).toEqual(["2026-08-09"]); // only the day Nordpool failed for
+  });
+
+  it("falls back to EnergyZero for a day Nordpool has nothing for yet", async () => {
+    // e.g. tomorrow, before Nordpool's auction has published.
+    fetchNordpoolDay.mockImplementation((d: string) => (d === "2026-08-10" ? [] : onePoint(d)));
+    const result = await refreshPrices();
+    expect(result.ok).toBe(true);
+    expect(fetchedDates()).toEqual(["2026-08-10"]);
   });
 
   it("backfills a past day that is missing entirely", async () => {

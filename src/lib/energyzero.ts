@@ -36,6 +36,10 @@ async function fetchEnergyZeroInterval(
  * Fetch raw quarter-hour market prices from EnergyZero for one local calendar day.
  * usageType=1 electricity, inclBtw=false = raw market price.
  *
+ * Fallback source only — refreshPrices() (see refresh.ts) tries Nordpool first, which
+ * already has real 15-min NL day-ahead prices (see nordpool.ts). This still exists for
+ * when Nordpool is unreachable.
+ *
  * interval=3 (quarter-hour) is a documented, API-accepted value, but as of this
  * writing EnergyZero's backend doesn't actually have quarter-hour data behind it —
  * it consistently echoes intervalType:3 but returns an empty Prices array, for every

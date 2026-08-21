@@ -1,7 +1,8 @@
 import { prisma } from "./db";
-import { fetchEnergyZeroDay } from "./energyzero";
+import { fetchEnergyZeroDay, RawPricePoint } from "./energyzero";
 import { fetchForecastSolarString } from "./forecastsolar";
 import { getEntityState } from "./ha-client";
+import { fetchNordpoolDay } from "./nordpool";
 import { allInPrice, feedInPrice } from "./pricing";
 import { addDaysISO, localDayBoundsUTC, todayISO } from "./time";
 
@@ -54,6 +55,22 @@ async function pricesDatesToFetch(today: string, tz: string, historyDays: number
   return dates;
 }
 
+/**
+ * Nordpool has real 15-min NL day-ahead prices; EnergyZero currently only replicates
+ * hourly ones (see energyzero.ts). Try Nordpool first and only fall back — on an error
+ * or on an empty day, e.g. before the auction publishes — so a Nordpool outage doesn't
+ * take pricing down with it.
+ */
+async function fetchDayAheadPrices(dateISO: string, tz: string): Promise<RawPricePoint[]> {
+  try {
+    const points = await fetchNordpoolDay(dateISO);
+    if (points.length > 0) return points;
+  } catch {
+    // fall through to EnergyZero
+  }
+  return fetchEnergyZeroDay(dateISO, tz);
+}
+
 export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
   const tz = settings.timezone;
@@ -66,7 +83,7 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   // fetched for today/tomorrow, which are the ones the planner actually needs.
   for (const dateISO of dates) {
     try {
-      const points = await fetchEnergyZeroDay(dateISO, tz);
+      const points = await fetchDayAheadPrices(dateISO, tz);
       if (points.length === 0 && dateISO < today) {
         emptyHistoricalDays.add(dateISO);
         continue;
