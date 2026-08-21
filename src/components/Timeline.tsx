@@ -427,7 +427,7 @@ function DayChart({
           );
         })}
 
-        {/* solar area — forecast, from PvString + forecast.solar */}
+        {/* solar area — forecast, estimated from recent measured PV history */}
         {solarArea && (
           <path d={solarArea} fill="rgba(255,216,115,0.18)" stroke="var(--color-solar)" strokeWidth={1.5} />
         )}

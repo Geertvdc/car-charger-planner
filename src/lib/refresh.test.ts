@@ -3,17 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const settingsFindUniqueOrThrow = vi.fn();
 const powerReadingCreate = vi.fn();
 const powerReadingDeleteMany = vi.fn();
+const powerReadingFindMany = vi.fn();
 const carStateFindFirst = vi.fn();
 const carStateCreate = vi.fn();
 const planStateUpdate = vi.fn();
 const priceSnapshotCount = vi.fn();
 const priceSnapshotUpsert = vi.fn();
+const solarForecastUpsert = vi.fn();
 vi.mock("./db", () => ({
   prisma: {
     settings: { findUniqueOrThrow: (...args: unknown[]) => settingsFindUniqueOrThrow(...args) },
     powerReading: {
       create: (...args: unknown[]) => powerReadingCreate(...args),
       deleteMany: (...args: unknown[]) => powerReadingDeleteMany(...args),
+      findMany: (...args: unknown[]) => powerReadingFindMany(...args),
     },
     carState: {
       findFirst: (...args: unknown[]) => carStateFindFirst(...args),
@@ -23,6 +26,9 @@ vi.mock("./db", () => ({
     priceSnapshot: {
       count: (...args: unknown[]) => priceSnapshotCount(...args),
       upsert: (...args: unknown[]) => priceSnapshotUpsert(...args),
+    },
+    solarForecast: {
+      upsert: (...args: unknown[]) => solarForecastUpsert(...args),
     },
   },
 }));
@@ -52,6 +58,7 @@ import {
   refreshChargerConnected,
   refreshPowerSample,
   refreshPrices,
+  refreshSolar,
 } from "./refresh";
 
 describe("refreshPowerSample", () => {
@@ -114,10 +121,48 @@ describe("refreshPowerSample", () => {
   });
 
   it("prunes samples older than the retention window", async () => {
-    settingsFindUniqueOrThrow.mockResolvedValue({ haPowerSensorEntityId: "sensor.grid" });
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      historyDays: 3,
+    });
     getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
     await refreshPowerSample();
     expect(powerReadingDeleteMany).toHaveBeenCalled();
+  });
+
+  it("keeps retention at least as long as the dashboard's history window", async () => {
+    // historyDays=3 means the oldest displayed day is ~3 days back; the retention
+    // cutoff must sit before that, or that day's chart loses its data mid-day as the
+    // cutoff sweeps across it — it must not be pinned to a fixed short window.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      historyDays: 5,
+    });
+    getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
+    await refreshPowerSample();
+    const cutoff = (powerReadingDeleteMany.mock.calls[0][0] as { where: { at: { lt: Date } } })
+      .where.at.lt;
+    expect(cutoff.getTime()).toBeLessThanOrEqual(new Date("2026-08-16T12:00:00Z").getTime());
+    vi.useRealTimers();
+  });
+
+  it("keeps retention at least as long as refreshSolar()'s history lookback, even with a short historyDays", async () => {
+    // historyDays=1 alone would only need 2 days, but refreshSolar() averages over a
+    // wider window (14 days) to estimate production — retention must cover that too.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    settingsFindUniqueOrThrow.mockResolvedValue({
+      haPowerSensorEntityId: "sensor.grid",
+      historyDays: 1,
+    });
+    getEntityState.mockResolvedValue({ state: "100", attributes: {}, last_changed: "" });
+    await refreshPowerSample();
+    const cutoff = (powerReadingDeleteMany.mock.calls[0][0] as { where: { at: { lt: Date } } })
+      .where.at.lt;
+    expect(cutoff.getTime()).toBeLessThanOrEqual(new Date("2026-08-07T12:00:00Z").getTime());
+    vi.useRealTimers();
   });
 
   it("fails gracefully on a non-numeric HA state (e.g. 'unavailable')", async () => {
@@ -138,6 +183,64 @@ describe("refreshPowerSample", () => {
     getEntityState.mockRejectedValue(new Error("fetch failed"));
     const result = await refreshPowerSample();
     expect(result).toEqual({ ok: false, count: 0, error: "fetch failed" });
+  });
+});
+
+describe("refreshSolar", () => {
+  const TZ = "Europe/Amsterdam";
+  const NOW = new Date("2026-08-09T10:00:00Z"); // 12:00 local (CEST, UTC+2)
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    settingsFindUniqueOrThrow.mockReset().mockResolvedValue({ timezone: TZ });
+    powerReadingFindMany.mockReset().mockResolvedValue([]);
+    solarForecastUpsert.mockReset().mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("no-ops when there's no measured PV history yet", async () => {
+    const result = await refreshSolar();
+    expect(result).toEqual({ ok: true, count: 0 });
+    expect(solarForecastUpsert).not.toHaveBeenCalled();
+  });
+
+  it("averages measured watts by local hour-of-day into today and tomorrow's forecast", async () => {
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T10:00:00Z"), pvWatts: 3000 }, // local 12:00
+      { at: new Date("2026-08-08T10:00:00Z"), pvWatts: 5000 }, // local 12:00
+    ]);
+    const result = await refreshSolar();
+    expect(result.ok).toBe(true);
+    expect(result.count).toBe(2); // today + tomorrow, the one hour with history
+    const call = solarForecastUpsert.mock.calls[0][0] as { create: { expectedWh: number } };
+    expect(call.create.expectedWh).toBe(4000); // average of 3000 and 5000
+  });
+
+  it("skips hours with no history rather than writing a false zero", async () => {
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T10:00:00Z"), pvWatts: 3000 }, // only local hour 12 populated
+    ]);
+    await refreshSolar();
+    expect(solarForecastUpsert).toHaveBeenCalledTimes(2); // today + tomorrow, that one hour only
+  });
+
+  it("clamps a negative sensor reading to zero", async () => {
+    powerReadingFindMany.mockResolvedValue([
+      { at: new Date("2026-08-07T02:00:00Z"), pvWatts: -3 }, // nighttime sensor noise
+    ]);
+    await refreshSolar();
+    const call = solarForecastUpsert.mock.calls[0][0] as { create: { expectedWh: number } };
+    expect(call.create.expectedWh).toBe(0);
+  });
+
+  it("returns ok:false without throwing on a DB error", async () => {
+    powerReadingFindMany.mockRejectedValue(new Error("db down"));
+    const result = await refreshSolar();
+    expect(result).toEqual({ ok: false, count: 0, error: "db down" });
   });
 });
 

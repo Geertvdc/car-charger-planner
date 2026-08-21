@@ -109,14 +109,6 @@ model CarConfig {
   updatedAt     DateTime @updatedAt @default(now())
 }
 
-model PvString {
-  id       Int    @id @default(autoincrement())
-  name     String @default("PV")
-  kwp      Float  @default(3.0)
-  tilt     Int    @default(35) // declination degrees, 0=horizontal, 90=vertical
-  azimuth  Int    @default(0)  // -180..180, 0=south, -90=east, 90=west (Forecast.Solar convention)
-}
-
 // ---- Availability template + overrides ----
 
 model WeeklyDay {

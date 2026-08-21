@@ -1,10 +1,9 @@
 import { prisma } from "./db";
 import { fetchEnergyZeroDay, RawPricePoint } from "./energyzero";
-import { fetchForecastSolarString } from "./forecastsolar";
 import { getEntityState } from "./ha-client";
 import { fetchNordpoolDay } from "./nordpool";
 import { allInPrice, feedInPrice } from "./pricing";
-import { addDaysISO, localDayBoundsUTC, todayISO } from "./time";
+import { addDaysISO, localDayBoundsUTC, localHour, localTimeToUTC, todayISO } from "./time";
 
 export interface RefreshResult {
   prices: { ok: boolean; count: number; error?: string };
@@ -118,37 +117,59 @@ export async function refreshPrices(): Promise<RefreshResult["prices"]> {
   return { ok: false, count, error: errors.join("; ") };
 }
 
+/**
+ * How many days of measured PV to average, by local hour-of-day, when estimating the
+ * next day's production. Wide enough to smooth out day-to-day weather noise; narrow
+ * enough to still track the season as day length shifts week to week.
+ *
+ * Deliberately not a physical model: no panel geometry, no external API, no rate limit.
+ * Just "what did this system actually do at this hour recently" — which already reflects
+ * whatever your roof's real orientation, tilt and shading do, without needing anyone to
+ * describe them (and get tilt/azimuth/kWp wrong in the process).
+ */
+const SOLAR_HISTORY_LOOKBACK_DAYS = 14;
+
 export async function refreshSolar(): Promise<RefreshResult["solar"]> {
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
-  const strings = await prisma.pvString.findMany();
   const tz = settings.timezone;
-  if (strings.length === 0) return { ok: true, count: 0 };
   try {
-    const combined = new Map<number, number>();
-    for (const s of strings) {
-      const byHour = await fetchForecastSolarString(
-        {
-          lat: settings.latitude,
-          lon: settings.longitude,
-          tilt: s.tilt,
-          azimuth: s.azimuth,
-          kwp: s.kwp,
-        },
-        tz
-      );
-      for (const [key, wh] of byHour) {
-        combined.set(key, (combined.get(key) ?? 0) + wh);
-      }
+    const since = new Date(Date.now() - SOLAR_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+    const readings = await prisma.powerReading.findMany({
+      where: { at: { gte: since }, pvWatts: { not: null } },
+      select: { at: true, pvWatts: true },
+    });
+    if (readings.length === 0) return { ok: true, count: 0 };
+
+    // Average measured watts by local hour-of-day across the whole lookback window.
+    // A 1-hour bucket's average watts numerically equals its Wh, matching what
+    // SolarForecast.expectedWh has always meant.
+    const byHour = new Map<number, { sum: number; count: number }>();
+    for (const r of readings) {
+      const hour = localHour(r.at, tz);
+      const bucket = byHour.get(hour) ?? { sum: 0, count: 0 };
+      bucket.sum += r.pvWatts as number;
+      bucket.count += 1;
+      byHour.set(hour, bucket);
     }
+
+    const today = todayISO(tz);
+    const tomorrow = addDaysISO(today, 1);
     let count = 0;
-    for (const [key, wh] of combined) {
-      const hourStart = new Date(key);
-      await prisma.solarForecast.upsert({
-        where: { hourStart },
-        create: { hourStart, expectedWh: wh },
-        update: { expectedWh: wh, fetchedAt: new Date() },
-      });
-      count++;
+    for (const dateISO of [today, tomorrow]) {
+      for (let hour = 0; hour < 24; hour++) {
+        const bucket = byHour.get(hour);
+        // No history for this hour yet (e.g. a brand-new install) — leave it unset
+        // rather than writing a false zero.
+        if (!bucket) continue;
+        const expectedWh = Math.max(0, bucket.sum / bucket.count);
+        const hourStart = localTimeToUTC(dateISO, `${String(hour).padStart(2, "0")}:00`, tz);
+        await prisma.solarForecast.upsert({
+          where: { hourStart },
+          create: { hourStart, expectedWh },
+          update: { expectedWh, fetchedAt: new Date() },
+        });
+        count++;
+      }
     }
     return { ok: true, count };
   } catch (e) {
@@ -156,8 +177,17 @@ export async function refreshSolar(): Promise<RefreshResult["solar"]> {
   }
 }
 
-/** Samples older than this are of no use to the controller's median window. */
-const POWER_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
+/**
+ * How long to keep power samples. Three things need this data to reach back far enough:
+ * the controller's median window (last few minutes), the dashboard timeline
+ * (`historyDays` days, or the oldest shown day loses its data mid-day as the rolling
+ * cutoff sweeps across it), and refreshSolar()'s history-based estimate (see
+ * SOLAR_HISTORY_LOOKBACK_DAYS above refreshSolar, which needs the longest reach of the
+ * three). +1 day of slack absorbs the local-time offset against this UTC cutoff.
+ */
+function powerRetentionMs(historyDays: number): number {
+  return Math.max(historyDays + 1, SOLAR_HISTORY_LOOKBACK_DAYS) * 24 * 60 * 60 * 1000;
+}
 
 /** Read one entity's state as a number; null when unset, missing or unreadable. */
 async function readWatts(entityId: string | undefined): Promise<number | null> {
@@ -198,7 +228,7 @@ export async function refreshPowerSample(): Promise<RefreshResult["power"]> {
     }
     await prisma.powerReading.create({ data: { watts, chargerWatts, pvWatts } });
     await prisma.powerReading.deleteMany({
-      where: { at: { lt: new Date(Date.now() - POWER_RETENTION_MS) } },
+      where: { at: { lt: new Date(Date.now() - powerRetentionMs(settings.historyDays)) } },
     });
     return { ok: true, count: 1 };
   } catch (e) {

@@ -116,23 +116,6 @@ export async function saveCar(formData: FormData) {
   await revalidateAll();
 }
 
-// ---- PV strings ----
-export async function addPv(formData: FormData) {
-  await prisma.pvString.create({
-    data: {
-      name: str(formData.get("name"), "PV"),
-      kwp: num(formData.get("kwp"), 3),
-      tilt: Math.round(num(formData.get("tilt"), 35)),
-      azimuth: Math.round(num(formData.get("azimuth"), 0)),
-    },
-  });
-  await revalidateAll();
-}
-export async function deletePv(formData: FormData) {
-  await prisma.pvString.delete({ where: { id: num(formData.get("id")) } });
-  await revalidateAll();
-}
-
 // ---- Weekly template ----
 export async function saveWeeklyDay(formData: FormData) {
   const dayOfWeek = Math.round(num(formData.get("dayOfWeek")));

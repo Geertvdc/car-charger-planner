@@ -299,8 +299,9 @@ export default async function SettingsPage() {
             <strong>Grid meter</strong> must read positive when importing and negative when
             exporting. <strong>Charger power</strong> is required: the grid reading already includes
             the car, so without it the controller would mistake its own draw for household demand
-            and throttle itself to nothing. <strong>Solar production</strong> is optional and shown
-            on the timeline only.
+            and throttle itself to nothing. <strong>Solar production</strong> is optional, shown on
+            the timeline, and is also what the solar forecast is estimated from — leave it unset and
+            there's no forecast, just the measured trace.
           </p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field

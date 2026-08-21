@@ -8,7 +8,7 @@ const nav = [
   { href: "/", label: "Dashboard" },
   { href: "/schedule", label: "Weekly schedule" },
   { href: "/upcoming", label: "Upcoming days" },
-  { href: "/config", label: "Car & solar" },
+  { href: "/config", label: "Car" },
   { href: "/settings", label: "Settings" },
 ];
 

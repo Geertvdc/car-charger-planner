@@ -1,17 +1,14 @@
 import { prisma } from "@/lib/db";
-import { addPv, deletePv, saveCar } from "@/app/actions";
+import { saveCar } from "@/app/actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function ConfigPage() {
-  const [car, pv] = await Promise.all([
-    prisma.carConfig.findUniqueOrThrow({ where: { id: 1 } }),
-    prisma.pvString.findMany({ orderBy: { id: "asc" } }),
-  ]);
+  const car = await prisma.carConfig.findUniqueOrThrow({ where: { id: 1 } });
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-extrabold tracking-tight">Car &amp; solar</h1>
+      <h1 className="text-2xl font-extrabold tracking-tight">Car</h1>
 
       <form action={saveCar} className="panel space-y-4 p-5">
         <h2 className="text-sm font-semibold text-[var(--color-accent)]">Car &amp; charger</h2>
@@ -47,46 +44,6 @@ export default async function ConfigPage() {
           Save car
         </button>
       </form>
-
-      <div className="panel space-y-4 p-5">
-        <h2 className="text-sm font-semibold text-[var(--color-accent)]">Solar strings</h2>
-        <p className="text-xs text-[var(--color-muted)]">
-          Used for the Forecast.Solar production forecast. Azimuth: 0 = south, −90 = east, 90 = west.
-        </p>
-
-        {pv.length === 0 && (
-          <p className="text-sm text-[var(--color-muted)]">No PV strings yet.</p>
-        )}
-        <div className="space-y-2">
-          {pv.map((p) => (
-            <div
-              key={p.id}
-              className="flex flex-wrap items-center gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm"
-            >
-              <span className="font-medium">{p.name}</span>
-              <span className="text-[var(--color-muted)]">{p.kwp} kWp</span>
-              <span className="text-[var(--color-muted)]">tilt {p.tilt}°</span>
-              <span className="text-[var(--color-muted)]">az {p.azimuth}°</span>
-              <form action={deletePv} className="ml-auto">
-                <input type="hidden" name="id" value={p.id} />
-                <button className="btn" type="submit">
-                  Remove
-                </button>
-              </form>
-            </div>
-          ))}
-        </div>
-
-        <form action={addPv} className="flex flex-wrap items-end gap-3 border-t border-[var(--color-border)] pt-4">
-          <Field label="Name" name="name" defaultValue="" type="text" />
-          <Field label="kWp" name="kwp" defaultValue={3} step="0.1" />
-          <Field label="Tilt°" name="tilt" defaultValue={35} step="1" />
-          <Field label="Azimuth°" name="azimuth" defaultValue={0} step="1" />
-          <button className="btn" type="submit">
-            + Add string
-          </button>
-        </form>
-      </div>
     </div>
   );
 }
