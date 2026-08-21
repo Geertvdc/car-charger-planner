@@ -1,5 +1,5 @@
 name: Car Charger Planner
-version: "0.3.1"
+version: "0.3.2"
 slug: car_charger_planner
 description: >-
   Charges your EV on the cheapest dynamic-price and solar hours while meeting a

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+- Fixed a deadline/target charging slot commanding the charger on even with no car
+  connected — the connected check only ran for solar-surplus decisions, so a plan slot
+  could log a charge that never physically happened (shown on the timeline as a hollow
+  amber outline for hours you weren't home).
+- The timeline now plots measured solar production, not just the forecast. The forecast
+  area and the live reading from your solar entity are overlaid on the same graph, with
+  the hover tooltip showing both.
+
 ## 0.3.1
 
 - Fixed the charger being left on when it resumed a charging session on its own (a
