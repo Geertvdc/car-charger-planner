@@ -310,15 +310,25 @@ export async function refreshChargerConnected(): Promise<RefreshResult["chargerC
 }
 
 export async function refreshAll(): Promise<RefreshResult> {
-  const [prices, solar, power, carSoc, chargerConnected] = await Promise.all([
-    refreshPrices(),
-    refreshSolar(),
-    refreshPowerSample(),
-    refreshCarSoc(),
-    refreshChargerConnected(),
-  ]);
+  const result: RefreshResult = await (async () => {
+    const [prices, solar, power, carSoc, chargerConnected] = await Promise.all([
+      refreshPrices(),
+      refreshSolar(),
+      refreshPowerSample(),
+      refreshCarSoc(),
+      refreshChargerConnected(),
+    ]);
+    return { prices, solar, power, carSoc, chargerConnected };
+  })();
+  // Each source isolates its own failure so one bad fetch can't block the rest, but that
+  // also means a source silently failing tick after tick (e.g. a rate-limited or
+  // misconfigured forecast fetch) would otherwise never show up anywhere. Log it here,
+  // once, in the one place every refresh path funnels through.
+  for (const [name, r] of Object.entries(result)) {
+    if (!r.ok) console.error(`[refresh] ${name} failed:`, r.error);
+  }
   // Recompute the plan against the freshest data.
   const { recomputePlan } = await import("./plan");
   await recomputePlan().catch(() => undefined);
-  return { prices, solar, power, carSoc, chargerConnected };
+  return result;
 }
